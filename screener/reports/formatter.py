@@ -252,58 +252,42 @@ def print_stock_report(
     console.print(hold_table)
 
     # ---- Section 5: Valuation ----
-    val_table = Table(title="Valuation Ratios", box=box.SIMPLE_HEAVY)
-    val_table.add_column("Metric", style="dim")
-    val_table.add_column("Value", justify="right")
-    val_table.add_column("Note", justify="left", style="dim")
-
     current_pe = advanced.pe_ratio
-    pe_note = ""
-    if current_pe and current_pe > 0 and advanced.pe_mean_historical:
-        pct = (current_pe - advanced.pe_mean_historical) / advanced.pe_mean_historical * 100
-        if pct > 25:
-            pe_note = Text(f"▲ {pct:.0f}% above 1yr mean — expensive", style="red")
-        elif pct < -15:
-            pe_note = Text(f"▼ {abs(pct):.0f}% below 1yr mean — cheap", style="green")
-        else:
-            pe_note = Text(f"≈ near 1yr mean ({pct:+.0f}%)", style="yellow")
-    val_table.add_row("P/E Ratio", _fmt(current_pe, "x"), pe_note or "")
-    val_table.add_row("P/B Ratio", _fmt(advanced.pb_ratio, "x"), "")
-    val_table.add_row("EV/EBITDA", _fmt(advanced.ev_ebitda, "x"), "")
-    console.print(val_table)
-
-    # ---- Historical P/E Context table ----
     _pe_rows = [
         ("1 Year",  advanced.pe_mean_historical, advanced.pe_min_historical, advanced.pe_max_historical),
         ("5 Year",  advanced.pe_mean_5y,          advanced.pe_min_5y,         advanced.pe_max_5y),
         ("10 Year", advanced.pe_mean_10y,          advanced.pe_min_10y,        advanced.pe_max_10y),
     ]
-    if any(mean is not None for _, mean, _, _ in _pe_rows):
-        pe_table = Table(
-            title=f"Historical P/E Context  [dim](current: {_fmt(current_pe, 'x')})[/dim]",
-            box=box.SIMPLE_HEAVY,
-        )
-        pe_table.add_column("Period",   style="dim",  min_width=8)
-        pe_table.add_column("Mean P/E", justify="right")
-        pe_table.add_column("Low – High",  justify="center", style="dim")
-        pe_table.add_column("vs Current",  justify="right")
+    val_table = Table(
+        title=f"Valuation  [dim](P/E current: {_fmt(current_pe, 'x')})[/dim]",
+        box=box.SIMPLE_HEAVY,
+    )
+    val_table.add_column("Period / Metric", style="dim", min_width=14)
+    val_table.add_column("Mean P/E", justify="right")
+    val_table.add_column("Low – High", justify="center", style="dim")
+    val_table.add_column("vs Current", justify="right")
 
-        for period, mean, lo, hi in _pe_rows:
-            if mean is None:
-                continue
-            range_str = f"{_fmt(lo, 'x')} – {_fmt(hi, 'x')}" if lo and hi else "-"
-            if current_pe and current_pe > 0:
-                pct = (current_pe - mean) / mean * 100
-                if pct > 25:
-                    vs = Text(f"▲ {pct:.0f}% above — expensive", style="red")
-                elif pct < -15:
-                    vs = Text(f"▼ {abs(pct):.0f}% below — cheap", style="green")
-                else:
-                    vs = Text(f"{pct:+.0f}% — near mean", style="yellow")
+    for period, mean, lo, hi in _pe_rows:
+        if mean is None:
+            continue
+        range_str = f"{_fmt(lo, 'x')} – {_fmt(hi, 'x')}" if lo and hi else "-"
+        if current_pe and current_pe > 0:
+            pct = (current_pe - mean) / mean * 100
+            if pct > 25:
+                vs = Text(f"▲ {pct:.0f}% above — expensive", style="red")
+            elif pct < -15:
+                vs = Text(f"▼ {abs(pct):.0f}% below — cheap", style="green")
             else:
-                vs = Text("-", style="dim")
-            pe_table.add_row(period, _fmt(mean, "x"), range_str, vs)
-        console.print(pe_table)
+                vs = Text(f"{pct:+.0f}% — near mean", style="yellow")
+        else:
+            vs = Text("-", style="dim")
+        val_table.add_row(period, _fmt(mean, "x"), range_str, vs)
+
+    # P/B and EV/EBITDA as extra rows (no historical range)
+    val_table.add_row("─" * 14, "─" * 8, "─" * 16, "─" * 20, style="dim")
+    val_table.add_row("P/B Ratio", _fmt(advanced.pb_ratio, "x"), "-", "-")
+    val_table.add_row("EV/EBITDA", _fmt(advanced.ev_ebitda, "x"), "-", "-")
+    console.print(val_table)
 
     # ---- Section 7: Working Capital ----
     wc_table = Table(title="Working Capital Efficiency", box=box.SIMPLE_HEAVY)
