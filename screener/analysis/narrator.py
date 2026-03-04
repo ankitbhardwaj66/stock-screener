@@ -166,9 +166,22 @@ def build_data_block(
         f"  EPS      QoQ/YoY : {_delta(basic.eps_qoq_pct)} / {_delta(basic.eps_yoy_pct)}",
         f"  EBITDA Margin    : {_fmt(basic.ebitda_margin_latest_pct, '%')}  (trend: {basic.ebitda_margin_trend or 'N/A'})",
     ]
-    if basic.ocf_pat_ratio is not None:
-        lines.append(f"  OCF/PAT Ratio    : {_fmt(basic.ocf_pat_ratio, 'x')}  (≥0.75 = healthy cash quality)")
-    if basic.ocf_trend:
+    ocf_ratio = basic.si_ocf_pat_ratio or basic.ocf_pat_ratio
+    if ocf_ratio is not None:
+        src = "annual" if basic.si_ocf_pat_ratio is not None else "quarterly"
+        lines.append(f"  OCF/PAT Ratio    : {_fmt(ocf_ratio, 'x')}  ({src}, ≥0.75 = healthy cash quality)")
+    if basic.si_ocf_annual is not None:
+        lines.append(f"\n── Annual Cash Flows (₹ Cr) ──")
+        lines.append(f"  Operating (OCF)  : ₹{basic.si_ocf_annual:,.0f} Cr  (trend: {basic.si_ocf_trend or 'N/A'})")
+        if basic.si_icf_annual is not None:
+            lines.append(f"  Investing (ICF)  : ₹{basic.si_icf_annual:,.0f} Cr")
+        if basic.si_fcf_annual is not None:
+            lines.append(f"  Free CF (OCF+ICF): ₹{basic.si_fcf_annual:,.0f} Cr")
+        if basic.si_cff_annual is not None:
+            lines.append(f"  Financing (CFF)  : ₹{basic.si_cff_annual:,.0f} Cr")
+        if basic.si_net_cf_annual is not None:
+            lines.append(f"  Net Cash Flow    : ₹{basic.si_net_cf_annual:,.0f} Cr")
+    elif basic.ocf_trend:
         lines.append(f"  OCF Trend        : {basic.ocf_trend}")
 
     lines.append("\n── Profitability ──")

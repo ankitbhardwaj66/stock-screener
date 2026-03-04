@@ -152,13 +152,69 @@ def print_stock_report(
         return Text("✓", style="green") if flag_val else Text("✗", style="red")
 
     prof_table.add_row("EBITDA Margin", _fmt(basic.ebitda_margin_latest_pct, "%"), basic.ebitda_margin_trend or "-")
-    if basic.ocf_pat_ratio is not None:
-        prof_table.add_row("OCF/PAT Ratio", _fmt(basic.ocf_pat_ratio, "x"), "✓" if basic.ocf_pat_ratio >= 0.75 else "✗")
-    if basic.ocf_trend:
-        prof_table.add_row("OCF Trend", "-", basic.ocf_trend)
+    ocf_ratio = basic.si_ocf_pat_ratio or basic.ocf_pat_ratio
+    if ocf_ratio is not None:
+        src = "[dim](annual)[/dim]" if basic.si_ocf_pat_ratio is not None else "[dim](qtrly)[/dim]"
+        prof_table.add_row(f"OCF/PAT Ratio  {src}", _fmt(ocf_ratio, "x"), "✓" if ocf_ratio >= 0.75 else "✗")
     prof_table.add_row("ROE", _fmt(advanced.roe_pct, "%"), "✓" if (advanced.roe_pct or 0) >= 15 else "✗")
     prof_table.add_row("ROCE", _fmt(advanced.roce_pct, "%"), "✓" if (advanced.roce_pct or 0) >= 12 else "✗")
     console.print(prof_table)
+
+    # ---- Section 2b: Annual Cash Flow (screener.in) ----
+    has_si_cf = any(v is not None for v in [
+        basic.si_ocf_annual, basic.si_icf_annual, basic.si_fcf_annual, basic.si_net_cf_annual
+    ])
+    if has_si_cf:
+        cf_table = Table(title="Cash Flow Analysis  [dim](Annual, ₹ Cr)[/dim]", box=box.SIMPLE_HEAVY)
+        cf_table.add_column("Activity", style="dim", min_width=22)
+        cf_table.add_column("Latest Year", justify="right")
+        cf_table.add_column("5Y Trend", justify="center")
+        cf_table.add_column("Signal", justify="center")
+
+        def _cf_val(val: Optional[float]) -> Text:
+            if val is None:
+                return Text("-", style="dim")
+            style = "green" if val >= 0 else "red"
+            return Text(f"₹{val:,.0f} Cr", style=style)
+
+        def _cf_signal(val: Optional[float], want_positive: bool = True) -> Text:
+            if val is None:
+                return Text("-", style="dim")
+            ok = val >= 0 if want_positive else val <= 0
+            return Text("✓", style="green") if ok else Text("✗", style="red")
+
+        cf_table.add_row(
+            "Operating (OCF)",
+            _cf_val(basic.si_ocf_annual),
+            basic.si_ocf_trend or "-",
+            _cf_signal(basic.si_ocf_annual, want_positive=True),
+        )
+        cf_table.add_row(
+            "Investing (ICF)",
+            _cf_val(basic.si_icf_annual),
+            "-",
+            _cf_signal(basic.si_icf_annual, want_positive=False),  # negative = investing = good
+        )
+        if basic.si_fcf_annual is not None:
+            cf_table.add_row(
+                "Free CF  [dim](OCF+ICF)[/dim]",
+                _cf_val(basic.si_fcf_annual),
+                "-",
+                _cf_signal(basic.si_fcf_annual, want_positive=True),
+            )
+        cf_table.add_row(
+            "Financing (CFF)",
+            _cf_val(basic.si_cff_annual),
+            "-",
+            "-",
+        )
+        cf_table.add_row(
+            "Net Cash Flow",
+            _cf_val(basic.si_net_cf_annual),
+            "-",
+            "-",
+        )
+        console.print(cf_table)
 
     # ---- Section 3: Debt Health ----
     debt_table = Table(title="Debt Health", box=box.SIMPLE_HEAVY)

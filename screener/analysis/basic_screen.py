@@ -46,7 +46,7 @@ class BasicScreenResult:
     # Margin
     ebitda_margin_latest_pct: Optional[float] = None
     ebitda_margin_trend: Optional[str] = None  # improving | stable | deteriorating
-    # Cash quality
+    # Cash quality (yfinance quarterly — fallback)
     ocf_pat_ratio: Optional[float] = None
     ocf_trend: Optional[str] = None  # improving | stable | deteriorating
     # Absolute latest values
@@ -54,6 +54,14 @@ class BasicScreenResult:
     pat_latest: Optional[float] = None
     eps_latest: Optional[float] = None
     ocf_latest: Optional[float] = None
+    # Annual cash flows from screener.in (primary, in Crores)
+    si_ocf_annual: Optional[float] = None   # Cash from Operating Activity
+    si_icf_annual: Optional[float] = None   # Cash from Investing Activity
+    si_fcf_annual: Optional[float] = None   # FCF = OCF + ICF
+    si_cff_annual: Optional[float] = None   # Cash from Financing Activity
+    si_net_cf_annual: Optional[float] = None  # Net Cash Flow
+    si_ocf_trend: Optional[str] = None      # 5yr trend of annual OCF
+    si_ocf_pat_ratio: Optional[float] = None  # annual OCF / annual PAT
     # Flags and score
     flags: list[ScreenFlag] = field(default_factory=list)
     score: int = 0
@@ -189,6 +197,7 @@ class BasicScreener:
         cashflow_df: Optional[pd.DataFrame],
         si_quarterly_df: Optional[pd.DataFrame] = None,
         si_annual_df: Optional[pd.DataFrame] = None,
+        si_cashflow_df: Optional[pd.DataFrame] = None,
     ) -> BasicScreenResult:
         """
         si_quarterly_df (screener.in) is used as the PRIMARY source for Revenue/PAT/EPS/margin.
@@ -278,16 +287,44 @@ class BasicScreener:
                     result.ebitda_margin_latest_pct = round(float(ebitda_margin.dropna().iloc[-1]), 2)
                     result.ebitda_margin_trend = _trend(ebitda_margin, window=8)
 
-        # ── OCF quality (yfinance only — screener.in cash flow is annual) ──
+        # ── OCF quality — yfinance quarterly (fallback) ───────────────────
         if cashflow_df is not None and not cashflow_df.empty:
             ocf_col = _find_col(cashflow_df, ["OCF", "Operating Cash Flow"])
             if ocf_col:
                 ocf = _col_as_series(cashflow_df, ocf_col)
                 result.ocf_latest = float(ocf.dropna().iloc[-1]) if not ocf.dropna().empty else None
                 result.ocf_trend = _trend(ocf, window=6)
-
                 if result.pat_latest and result.pat_latest != 0 and result.ocf_latest is not None:
                     result.ocf_pat_ratio = round(result.ocf_latest / result.pat_latest, 2)
+
+        # ── Annual cash flows — screener.in (primary, reliable) ───────────
+        if si_cashflow_df is not None and not si_cashflow_df.empty:
+            ocf_s = _si_row_series(si_cashflow_df, ["Cash from Operating", "Operating Activity", "operating"])
+            icf_s = _si_row_series(si_cashflow_df, ["Cash from Investing", "Investing Activity", "investing"])
+            cff_s = _si_row_series(si_cashflow_df, ["Cash from Financing", "Financing Activity", "financing"])
+            ncf_s = _si_row_series(si_cashflow_df, ["Net Cash Flow", "Net Cash", "net cash"])
+
+            if ocf_s is not None and not ocf_s.dropna().empty:
+                result.si_ocf_annual = float(ocf_s.dropna().iloc[-1])
+                result.si_ocf_trend = _trend(ocf_s, window=5)
+            if icf_s is not None and not icf_s.dropna().empty:
+                result.si_icf_annual = float(icf_s.dropna().iloc[-1])
+            if cff_s is not None and not cff_s.dropna().empty:
+                result.si_cff_annual = float(cff_s.dropna().iloc[-1])
+            if ncf_s is not None and not ncf_s.dropna().empty:
+                result.si_net_cf_annual = float(ncf_s.dropna().iloc[-1])
+            if result.si_ocf_annual is not None and result.si_icf_annual is not None:
+                result.si_fcf_annual = result.si_ocf_annual + result.si_icf_annual
+
+            # OCF/PAT ratio using annual data — more reliable than quarterly
+            if ann_ok and result.si_ocf_annual is not None:
+                ann_pat = _si_row_series(si_annual_df, ["Net Profit", "PAT"])
+                if ann_pat is not None and not ann_pat.dropna().empty:
+                    ann_pat_latest = float(ann_pat.dropna().iloc[-1])
+                    if ann_pat_latest != 0:
+                        result.si_ocf_pat_ratio = round(result.si_ocf_annual / ann_pat_latest, 2)
+                        # Prefer annual OCF/PAT ratio over quarterly
+                        result.ocf_pat_ratio = result.si_ocf_pat_ratio
 
         # --- Flags ---
         self._apply_flags(result, cfg_g, cfg_p, income_df, cashflow_df)
@@ -349,8 +386,13 @@ class BasicScreener:
 
         # PAT rising + OCF declining = earnings quality concern
         if result.pat_yoy_pct is not None and result.pat_yoy_pct > 10:
-            if result.ocf_trend == "deteriorating":
+            ocf_trend_check = result.si_ocf_trend or result.ocf_trend
+            if ocf_trend_check == "deteriorating":
                 result.flags.append(ScreenFlag(FlagLevel.RED, "CashQuality", "PAT rising but OCF declining — earnings quality concern"))
+
+        # Negative FCF flag
+        if result.si_fcf_annual is not None and result.si_fcf_annual < 0:
+            result.flags.append(ScreenFlag(FlagLevel.YELLOW, "CashQuality", f"Negative FCF: ₹{result.si_fcf_annual:,.0f} Cr — investing more than operating cash generated"))
 
     def _compute_score(self, result: BasicScreenResult, cfg_g: dict, cfg_p: dict) -> int:
         score = 50  # Start neutral
