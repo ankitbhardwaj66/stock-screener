@@ -59,8 +59,21 @@ class ScreenerInFetcher:
         """RELIANCE.NS → RELIANCE"""
         return symbol.upper().split(".")[0]
 
+    @staticmethod
+    def _page_has_data(soup: BeautifulSoup) -> bool:
+        """Return True if the page contains at least one key financial data section."""
+        for sid in ("quarters", "profit-loss", "balance-sheet"):
+            if soup.find("section", {"id": sid}):
+                return True
+        return False
+
     def _fetch_page(self, symbol: str) -> Optional[BeautifulSoup]:
-        """Fetch screener.in page — cached in memory for the session lifetime."""
+        """Fetch screener.in page — tries consolidated first, falls back to standalone.
+
+        Acceptance requires actual financial sections to be present, so a consolidated
+        URL that returns a valid 200 but has no data (e.g. SBICARD) is rejected and
+        the standalone URL is tried next.
+        """
         normalized = self._normalize_symbol(symbol)
         if normalized in self._page_cache:
             return self._page_cache[normalized]
@@ -72,14 +85,9 @@ class ScreenerInFetcher:
                 time.sleep(random.uniform(1.0, 2.0))
                 resp = self._session.get(url, timeout=20)
                 if resp.status_code == 200:
-                    # Quick sanity check that we got a real company page
-                    if "screener.in" in resp.url and normalized.lower() in resp.url.lower():
-                        soup = BeautifulSoup(resp.text, "lxml")
-                        break
-                    soup = BeautifulSoup(resp.text, "lxml")
-                    # If the page has a meaningful company name, accept it
-                    title = soup.find("h1")
-                    if title and title.get_text(strip=True):
+                    candidate = BeautifulSoup(resp.text, "lxml")
+                    if self._page_has_data(candidate):
+                        soup = candidate
                         break
             except Exception:
                 continue

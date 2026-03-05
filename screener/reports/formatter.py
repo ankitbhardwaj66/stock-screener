@@ -110,10 +110,57 @@ def print_stock_report(
     header_lines.append(f"\nScore: [{label_style}]{total_score}/100 — {label}[/{label_style}]")
     console.print(Panel("\n".join(header_lines), title="[bold]Stock Analysis Report[/bold]", border_style="cyan"))
 
+    bbd = basic.score_breakdown
+    abd = advanced.score_breakdown
+
+    def _pts(val: int) -> str:
+        """Format a score contribution as a coloured label for table titles."""
+        if val > 0:
+            return f"  [dim green](+{val} pts)[/dim green]"
+        elif val < 0:
+            return f"  [dim red]({val} pts)[/dim red]"
+        return "  [dim](0 pts)[/dim]"
+
+    # ---- Score Breakdown Panel ----
+    def _eff(raw: int, w: float) -> int:
+        return round(raw * w)
+
+    def _row_str(label: str, raw: int, weight: str, final: int) -> str:
+        color = "green" if final > 0 else "red" if final < 0 else "dim"
+        raw_str = f"{raw:+d} pts"
+        final_str = f"{final:+d} pts"
+        return f"  {label:<32} {raw_str:>8}   {weight:>5}   [{color}]{final_str:>8}[/{color}]"
+
+    BW, AW = 0.4, 0.6
+    base_final = round(50 * BW) + round(50 * AW)  # = 50
+    bd_rows = [
+        f"  {'Component':<32} {'Raw':>7}        {'Wt':>5}   {'→ Score':>8}",
+        "  " + "─" * 58,
+        f"  {'Base (start of both screeners)':<32} {'50':>7}        {'  —':>5}   [dim]+{base_final:>4} pts[/dim]",
+        "  " + "─" * 58,
+        f"  [dim]Basic Screener  (×{BW})[/dim]",
+        _row_str("  Growth", bbd.get("growth", 0), f"×{BW}", _eff(bbd.get("growth", 0), BW)),
+        _row_str("  Profitability", bbd.get("profitability", 0), f"×{BW}", _eff(bbd.get("profitability", 0), BW)),
+        _row_str("  Cash Quality", bbd.get("cash_quality", 0), f"×{BW}", _eff(bbd.get("cash_quality", 0), BW)),
+        _row_str("  Penalties", bbd.get("penalties", 0), f"×{BW}", _eff(bbd.get("penalties", 0), BW)),
+        "  " + "─" * 58,
+        f"  [dim]Advanced Screener  (×{AW})[/dim]",
+        _row_str("  Profitability", abd.get("profitability", 0), f"×{AW}", _eff(abd.get("profitability", 0), AW)),
+        _row_str("  Debt Health", abd.get("debt", 0), f"×{AW}", _eff(abd.get("debt", 0), AW)),
+        _row_str("  Shareholding", abd.get("shareholding", 0), f"×{AW}", _eff(abd.get("shareholding", 0), AW)),
+        _row_str("  Valuation", abd.get("valuation", 0), f"×{AW}", _eff(abd.get("valuation", 0), AW)),
+        _row_str("  Penalties", abd.get("penalties", 0), f"×{AW}", _eff(abd.get("penalties", 0), AW)),
+        "  " + "═" * 58,
+        f"  {'TOTAL':<32} {'':>7}        {'':>5}   [bold {label_style}]+{total_score:>4} pts[/bold {label_style}]",
+    ]
+    console.print(Panel("\n".join(bd_rows), title="[bold]Score Breakdown[/bold]", border_style="dim"))
+
     # ---- Section 1: Growth Metrics ----
-    growth_table = Table(title="Growth Metrics", box=box.SIMPLE_HEAVY, show_header=True)
+    growth_pts = bbd.get("growth", 0)
+    growth_table = Table(title=f"Growth Metrics{_pts(growth_pts)}", box=box.SIMPLE_HEAVY, show_header=True)
     growth_table.add_column("Metric", style="dim")
     growth_table.add_column("Avg QoQ % (5Q)", justify="right")
+    growth_table.add_column("Avg YoY % (3Y)", justify="right")
     growth_table.add_column("Avg YoY % (5Y)", justify="right")
     growth_table.add_column("Latest Value", justify="right")
 
@@ -125,25 +172,29 @@ def print_stock_report(
     growth_table.add_row(
         "Revenue",
         Text(_fmt(basic.revenue_qoq_pct, "%"), style=_growth_style(basic.revenue_qoq_pct)),
+        Text(_fmt(basic.revenue_yoy_3y_pct, "%"), style=_growth_style(basic.revenue_yoy_3y_pct, 10)),
         Text(_fmt(basic.revenue_yoy_pct, "%"), style=_growth_style(basic.revenue_yoy_pct, 10)),
         _fmt_inr(basic.revenue_latest),
     )
     growth_table.add_row(
-        "PAT / Net Income",
+        "PAT (Net Income)",
         Text(_fmt(basic.pat_qoq_pct, "%"), style=_growth_style(basic.pat_qoq_pct)),
+        Text(_fmt(basic.pat_yoy_3y_pct, "%"), style=_growth_style(basic.pat_yoy_3y_pct, 10)),
         Text(_fmt(basic.pat_yoy_pct, "%"), style=_growth_style(basic.pat_yoy_pct, 10)),
         _fmt_inr(basic.pat_latest),
     )
     growth_table.add_row(
         "EPS",
         Text(_fmt(basic.eps_qoq_pct, "%"), style=_growth_style(basic.eps_qoq_pct)),
+        Text(_fmt(basic.eps_yoy_3y_pct, "%"), style=_growth_style(basic.eps_yoy_3y_pct, 10)),
         Text(_fmt(basic.eps_yoy_pct, "%"), style=_growth_style(basic.eps_yoy_pct, 10)),
         _fmt(basic.eps_latest, " ₹"),
     )
     console.print(growth_table)
 
     # ---- Section 2: Profitability ----
-    prof_table = Table(title="Profitability & Cash Quality", box=box.SIMPLE_HEAVY)
+    prof_pts = bbd.get("profitability", 0) + bbd.get("cash_quality", 0) + abd.get("profitability", 0)
+    prof_table = Table(title=f"Profitability & Cash Quality{_pts(prof_pts)}", box=box.SIMPLE_HEAVY)
     prof_table.add_column("Metric", style="dim")
     prof_table.add_column("Value", justify="right")
     prof_table.add_column("Signal", justify="center")
@@ -155,7 +206,14 @@ def print_stock_report(
     ocf_ratio = basic.si_ocf_pat_ratio or basic.ocf_pat_ratio
     if ocf_ratio is not None:
         src = "[dim](annual)[/dim]" if basic.si_ocf_pat_ratio is not None else "[dim](qtrly)[/dim]"
-        prof_table.add_row(f"OCF/PAT Ratio  {src}", _fmt(ocf_ratio, "x"), "✓" if ocf_ratio >= 0.75 else "✗")
+        ocf_trend = basic.si_ocf_trend or basic.ocf_trend
+        _trend_arrow = {"improving": "↑", "deteriorating": "↓", "stable": "→"}.get(ocf_trend or "", "")
+        _trend_style = {"improving": "green", "deteriorating": "red", "stable": "yellow"}.get(ocf_trend or "", "dim")
+        _pass = ocf_ratio >= 0.75
+        ocf_signal = Text()
+        ocf_signal.append("✓ " if _pass else "✗ ", style="green" if _pass else "red")
+        ocf_signal.append(f"{ocf_trend} {_trend_arrow}" if ocf_trend else "-", style=_trend_style)
+        prof_table.add_row(f"OCF/PAT Ratio  {src}", _fmt(ocf_ratio, "x"), ocf_signal)
     prof_table.add_row("ROE", _fmt(advanced.roe_pct, "%"), "✓" if (advanced.roe_pct or 0) >= 15 else "✗")
     prof_table.add_row("ROCE", _fmt(advanced.roce_pct, "%"), "✓" if (advanced.roce_pct or 0) >= 12 else "✗")
     console.print(prof_table)
@@ -217,7 +275,7 @@ def print_stock_report(
         console.print(cf_table)
 
     # ---- Section 3: Debt Health ----
-    debt_table = Table(title="Debt Health", box=box.SIMPLE_HEAVY)
+    debt_table = Table(title=f"Debt Health{_pts(abd.get('debt', 0))}", box=box.SIMPLE_HEAVY)
     debt_table.add_column("Metric", style="dim")
     debt_table.add_column("Value", justify="right")
     debt_table.add_column("Threshold", justify="right", style="dim")
@@ -229,7 +287,7 @@ def print_stock_report(
     console.print(debt_table)
 
     # ---- Section 4: Shareholding ----
-    hold_table = Table(title="Shareholding Pattern", box=box.SIMPLE_HEAVY)
+    hold_table = Table(title=f"Shareholding Pattern{_pts(abd.get('shareholding', 0))}", box=box.SIMPLE_HEAVY)
     hold_table.add_column("Holder", style="dim")
     hold_table.add_column("Current %", justify="right")
     hold_table.add_column("QoQ Change", justify="right")
@@ -259,7 +317,7 @@ def print_stock_report(
         ("10 Year", advanced.pe_mean_10y,          advanced.pe_min_10y,        advanced.pe_max_10y),
     ]
     val_table = Table(
-        title=f"Valuation  [dim](P/E current: {_fmt(current_pe, 'x')})[/dim]",
+        title=f"Valuation  [dim](P/E current: {_fmt(current_pe, 'x')})[/dim]{_pts(abd.get('valuation', 0))}",
         box=box.SIMPLE_HEAVY,
     )
     val_table.add_column("Period / Metric", style="dim", min_width=14)
@@ -287,6 +345,9 @@ def print_stock_report(
     val_table.add_row("─" * 14, "─" * 8, "─" * 16, "─" * 20, style="dim")
     val_table.add_row("P/B Ratio", _fmt(advanced.pb_ratio, "x"), "-", "-")
     val_table.add_row("EV/EBITDA", _fmt(advanced.ev_ebitda, "x"), "-", "-")
+    if advanced.peg_ratio is not None:
+        peg_style = "green" if advanced.peg_ratio < 1.0 else "yellow" if advanced.peg_ratio <= 1.5 else "red"
+        val_table.add_row("PEG Ratio", Text(f"{advanced.peg_ratio:.2f}x", style=peg_style), "< 1.5", "-")
     console.print(val_table)
 
     # ---- Section 7: Working Capital ----

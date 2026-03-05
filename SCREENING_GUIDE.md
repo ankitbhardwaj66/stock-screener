@@ -7,13 +7,12 @@ A standalone reference for evaluating Indian listed companies each quarter. Use 
 ## Table of Contents
 
 1. [Quarterly P&L Quality](#1-quarterly-pl-quality)
-2. [Auditor Opinion & Key Phrases](#2-auditor-opinion--key-phrases)
-3. [Debt Health Analysis](#3-debt-health-analysis)
-4. [Promoter & Institutional Activity](#4-promoter--institutional-activity)
-5. [Valuation Ratios](#5-valuation-ratios)
-6. [Red Flag Checklist](#6-red-flag-checklist)
-7. [Sector-Specific Notes](#7-sector-specific-notes)
-8. [Quantitative Scorecard Template](#8-quantitative-scorecard-template)
+2. [Debt Health Analysis](#2-debt-health-analysis)
+3. [Promoter & Institutional Activity](#3-promoter--institutional-activity)
+4. [Valuation Ratios](#4-valuation-ratios)
+5. [Red Flag Checklist](#5-red-flag-checklist)
+6. [Sector-Specific Notes](#6-sector-specific-notes)
+7. [Quantitative Scorecard — CLI Scoring Reference](#7-quantitative-scorecard--cli-scoring-reference)
 
 ---
 
@@ -34,6 +33,9 @@ A standalone reference for evaluating Indian listed companies each quarter. Use 
 - Check if growth is organic or acquisition-driven (check balance sheet for goodwill spike)
 - Revenue with rising debtors = possible channel stuffing
 
+**CLI shows three growth views:** Avg QoQ % (5Q), Avg YoY % (3Y), Avg YoY % (5Y).
+The 3Y vs 5Y comparison is key — if 3Y is accelerating above 5Y, growth is picking up; if 3Y is below 5Y, growth is fading.
+
 ### 1.2 EBITDA Margin
 
 EBITDA = Operating Profit before depreciation, interest, and tax.
@@ -49,6 +51,8 @@ EBITDA = Operating Profit before depreciation, interest, and tax.
 
 Watch for: margins recovering only due to cost cuts (not revenue growth) — unsustainable.
 
+> **Note for financial companies (NBFCs, banks, HFCs):** The EBITDA margin shown is OPM% from screener.in, which for financial companies reflects the spread/NIM, not traditional EBITDA. Values of 70–90% are normal and expected.
+
 ### 1.3 PAT (Profit After Tax)
 
 PAT quality matters more than PAT quantum.
@@ -62,7 +66,8 @@ PAT quality matters more than PAT quantum.
 ### 1.4 EPS (Earnings Per Share)
 
 - Use **Diluted EPS** for proper comparison (accounts for warrants, ESOPs)
-- EPS declining despite PAT rising → check for fresh equity dilution
+- EPS declining despite PAT rising → check for fresh equity dilution (QIP, rights issue, ESOPs)
+- If PAT YoY (5Y) >> EPS YoY (5Y), the company has significantly diluted shares over 5 years
 - Consistent EPS growth of 15%+ YoY over 4+ quarters = quality signal
 
 ### 1.5 Operating Cash Flow (OCF) Quality
@@ -87,53 +92,13 @@ OCF/PAT Ratio = Operating Cash Flow / Net Profit After Tax
 - Inventory pile-up
 - Related party transactions inflating paper profits
 
----
+**CLI shows** the OCF/PAT ratio with a **5-year trend direction** (improving ↑ / stable → / deteriorating ↓) alongside the ✓/✗ pass/fail check.
 
-## 2. Auditor Opinion & Key Phrases
-
-### 2.1 Audit Opinion Types
-
-| Opinion | Meaning | Action |
-|---------|---------|--------|
-| **Unqualified (Clean)** | No issues found | Normal |
-| **Qualified** | Auditor disagrees on specific items | Investigate qualification |
-| **Adverse** | Financial statements materially misstated | SELL signal |
-| **Disclaimer** | Auditor unable to form opinion | SELL signal |
-| **Emphasis of Matter** | Not a qualification, but drawing attention | Read the note carefully |
-
-### 2.2 Red Flag Phrases in Audit Reports
-
-| Phrase | Risk Level | What It Means |
-|--------|------------|---------------|
-| "Going concern" | CRITICAL | Company may not survive 12 months |
-| "Material uncertainty" | HIGH | Serious doubt about viability |
-| "Qualified opinion" | HIGH | Auditor disagrees with treatment |
-| "Emphasis of matter" | MEDIUM | Something needs attention |
-| "Contingent liabilities" (large) | MEDIUM-HIGH | Hidden future obligations |
-| "Related party transactions not at arm's length" | HIGH | Money may be siphoned |
-| "Loans and advances to subsidiaries" (rising) | MEDIUM | Cash may be parked away |
-| "Revenue recognition policy changed" | MEDIUM | May inflate current year profits |
-
-### 2.3 CARO (Companies Audit Report Order) Checks
-
-CARO 2020 requires auditors to comment on:
-- Whether loans to related parties are prejudicial to company's interest
-- Whether term loans were used for intended purpose
-- Whether company has defaulted on any dues to banks/FIs
-- Fraud detected by/against company
-
-Always read CARO notes in annual reports — quarterly reports don't include full CARO, but watch for mentions.
-
-### 2.4 Auditor Change
-
-- Auditor resignation mid-year → significant red flag
-- Frequent auditor rotation (every 1-2 years) → possible opinion shopping
-- Big 4 replacing smaller auditor → usually positive
-- Smaller auditor replacing Big 4 → investigate why
+> **⚠ Financial sector exception:** For banks, NBFCs, HFCs, and insurance companies, negative OCF is **normal and expected**. Loan disbursements are classified as operating cash outflows under accounting standards. The CLI automatically detects financial sector companies and skips the OCF/PAT check entirely for them. A `[GREEN] CashQuality: Financial sector — OCF/FCF checks not applicable` flag will appear in the output.
 
 ---
 
-## 3. Debt Health Analysis
+## 2. Debt Health Analysis
 
 ### 3.1 Key Debt Ratios
 
@@ -142,15 +107,15 @@ Always read CARO notes in annual reports — quarterly reports don't include ful
 D/E = Total Debt / Shareholders' Equity
 ```
 
-| D/E | Signal |
-|-----|--------|
-| < 0.5 | Debt-free / very low debt |
-| 0.5–1.0 | Conservative |
-| 1.0–2.0 | Moderate — monitor |
-| > 2.0 | HIGH RISK |
-| > 3.0 | RED FLAG (except banks/NBFCs) |
+| D/E | Signal | Note |
+|-----|--------|------|
+| < 0.5 | Debt-free / very low debt | |
+| 0.5–1.0 | Conservative | |
+| 1.0–2.0 | Moderate — monitor | |
+| > 2.0 | HIGH RISK | |
+| > 3.0 | RED FLAG | Except banks/NBFCs |
 
-Note: Banks/NBFCs have structurally high D/E — use Capital Adequacy Ratio (CAR) instead.
+> **Financial sector D/E thresholds (CLI):** NBFCs and HFCs have leverage as a core business requirement. The CLI uses relaxed thresholds: ≤ 5.0x = acceptable, > 8.0x = red flag. D/E of 1.5–4x is typical and healthy for well-run NBFCs.
 
 **Interest Coverage Ratio (ICR)**
 ```
@@ -179,10 +144,12 @@ Net Debt/EBITDA = Net Debt / Annual EBITDA
 | > 3x | Concerning |
 | > 5x | RED FLAG |
 
+> **Tip:** A company can have a low D/E but high Net Debt/EBITDA if earnings are thin relative to debt. Check both. The D/E looks at asset cover; Net Debt/EBITDA measures how many years of operating profit to repay debt.
+
 ### 3.2 Debt Quality Checks
 
 - **Short-term vs Long-term debt**: High short-term debt (CP, working capital loans) in a rising interest rate cycle = refinancing risk
-- **Debt vs Revenue growth**: Debt growing faster than revenue = LEVERAGE for GROWTH problem
+- **Debt vs Revenue growth**: Debt growing faster than revenue = leverage without proportionate growth
 - **Debt for capex vs operations**: Debt taken for capacity expansion is acceptable; debt to fund operations is a red flag
 - **Promoter-level debt**: Check if promoters have pledged shares to borrow — company balance sheet may look clean but promoter is leveraged
 
@@ -203,9 +170,16 @@ Always read management commentary on probability of crystallization.
 ```
 Debtor Days = (Trade Receivables / Net Sales) × 365
 Inventory Days = (Inventory / COGS) × 365
-Creditor Days = (Trade Payables / Purchases) × 365
-Cash Conversion Cycle = Debtor Days + Inventory Days − Creditor Days
+Days Payable = (Trade Payables / COGS) × 365
+Cash Conversion Cycle = Debtor Days + Inventory Days − Days Payable
 ```
+
+**CLI thresholds:**
+
+| Metric | Max (YELLOW flag) |
+|--------|------------------|
+| Debtor Days | > 90 days |
+| Inventory Days | > 120 days |
 
 **Warning signs:**
 - Debtor days rising QoQ → customers not paying, or aggressive revenue recognition
@@ -214,7 +188,7 @@ Cash Conversion Cycle = Debtor Days + Inventory Days − Creditor Days
 
 ---
 
-## 4. Promoter & Institutional Activity
+## 3. Promoter & Institutional Activity
 
 ### 4.1 Promoter Holding
 
@@ -234,30 +208,29 @@ Cash Conversion Cycle = Debtor Days + Inventory Days − Creditor Days
 - Selling through bulk/block deals → may be distress or diversification
 - Selling after stock split/bonus → may be suspect
 
-**CLI Scoring — Promoter Holding Change (max ±10 pts):**
+**CLI tracks both QoQ change and 6-quarter trend:**
 
 | QoQ Change | Score Impact |
 |------------|-------------|
-| > +1% | +6 (strong buying signal) |
-| 0 to +1% | +2 (mild accumulation) |
-| 0 to −threshold | −3 (mild selling) |
-| < −threshold | −8 (meaningful selling) |
+| > +1% | +6 |
+| 0 to +1% | +2 |
+| 0 to −2% | −3 |
+| < −2% | −8 |
 
-6-quarter trend reinforces the QoQ signal: sustained buying over 6Q adds +2; sustained selling subtracts −2.
+6-quarter trend reinforces the QoQ signal: sustained buying > +2% over 6Q adds +2 pts; sustained selling < −3% over 6Q subtracts −2 pts.
 
 ### 4.2 Promoter Pledge
 
 **Pledge mechanics**: Promoter borrows money by pledging shares. If stock price falls below margin, lender can sell shares → cascade fall.
 
-| Pledge % of Promoter Holding | Risk |
-|------------------------------|------|
-| 0% | No risk |
-| < 10% | Low |
-| 10–25% | Moderate — monitor |
-| > 25% | HIGH RISK |
-| > 50% | RED FLAG |
+| Pledge % of Promoter Holding | Risk | CLI Score |
+|------------------------------|------|-----------|
+| 0% | No risk | +5 |
+| < 10% | Low | +2 |
+| 10–25% | Moderate — monitor | −5 |
+| > 25% | HIGH RISK | −10 |
 
-**Critical signal**: Pledge percentage INCREASING quarter-over-quarter means promoter is borrowing MORE against shares — financial stress indicator.
+**Critical signal**: Pledge percentage increasing > 5% QoQ → immediate −10 pts and RED flag.
 
 ### 4.3 FII/FPI Activity
 
@@ -265,9 +238,9 @@ FII (Foreign Institutional Investors) / FPI (Foreign Portfolio Investors) are so
 
 | Signal | Interpretation |
 |--------|----------------|
-| FII buying > 1% QoQ | Bullish — international money coming in |
+| FII buying ≥ +1% QoQ | Bullish — international money coming in |
 | FII holding steady | Neutral |
-| FII selling > 1% QoQ | Caution — may signal concerns |
+| FII selling ≥ −1% QoQ | Caution — may signal concerns |
 | FII selling + DII buying | Transition — domestic confidence |
 | Both FII + DII selling | RED FLAG |
 
@@ -277,13 +250,11 @@ FII (Foreign Institutional Investors) / FPI (Foreign Portfolio Investors) are so
 
 | FII QoQ Change | Score Impact |
 |----------------|-------------|
-| ≥ 2× threshold (e.g. ≥ +2%) | +6 |
-| ≥ threshold (e.g. ≥ +1%) | +3 |
-| 0 to −threshold | 0 |
-| ≤ −threshold | −3 |
-| ≤ −2× threshold | −6 |
-
-Threshold defaults to `fii_increase_min_pct: 1.0` in `config/thresholds.yaml`.
+| ≥ +2% | +6 |
+| ≥ +1% | +3 |
+| 0 to −1% | 0 |
+| ≤ −1% | −3 |
+| ≤ −2% | −6 |
 
 ### 4.4 DII Activity
 
@@ -297,9 +268,9 @@ DII (Domestic Institutional Investors) = Mutual Funds + Insurance companies + Pe
 
 | DII QoQ Change | Score Impact |
 |----------------|-------------|
-| ≥ threshold | +3 |
-| 0 to −threshold | 0 |
-| ≤ −threshold | −3 |
+| ≥ +1% | +3 |
+| 0 to −1% | 0 |
+| ≤ −1% | −3 |
 
 ### 4.5 Shareholding Concentration Risk
 
@@ -309,7 +280,7 @@ DII (Domestic Institutional Investors) = Mutual Funds + Insurance companies + Pe
 
 ---
 
-## 5. Valuation Ratios
+## 4. Valuation Ratios
 
 ### 5.1 Price to Earnings (P/E)
 
@@ -323,39 +294,30 @@ Forward P/E = Price / Next 12 months estimated EPS
 - A P/E of 50 for a 40% growth company may be cheap (PEG < 1.25)
 - A P/E of 15 for a declining business is expensive
 
-| P/E Range | Signal (for average Indian company) |
-|-----------|-------------------------------------|
-| < 10 | Very cheap (or value trap — verify) |
-| 10–20 | Reasonable |
-| 20–35 | Growth premium, justified if growth > 15% |
-| 35–60 | High expectations priced in |
-| > 60 | Speculative — needs very high growth |
+| P/E Range | Signal (for average Indian company) | CLI Score |
+|-----------|-------------------------------------|-----------|
+| < 15 | Very cheap | +10 |
+| 15–40 | Reasonable | +5 |
+| 40–60 | High expectations priced in | −5 |
+| > 60 | Speculative | −10 |
 
 **Historical P/E vs Mean (most powerful valuation signal):**
 
 Compare the current P/E to the stock's own 5-year (or 1-year) mean P/E. This accounts for sector-specific re-rating and is far more useful than an absolute P/E threshold.
 
 ```
-P/E Ratio = Current P/E / Historical Mean P/E (5Y preferred, 1Y fallback)
+Ratio = Current P/E / Historical Mean P/E  (5Y preferred, 1Y fallback)
 ```
 
-| Ratio | Interpretation |
-|-------|----------------|
-| < 0.70 | Trading at steep discount to own history — strong value opportunity |
-| 0.70–0.90 | Moderately undervalued |
-| 0.90–1.15 | Fair value — near historical average |
-| 1.15–1.40 | Moderately overvalued |
-| > 1.40 | Significantly above historical average — priced for perfection |
+| Ratio | Interpretation | CLI Score |
+|-------|----------------|-----------|
+| < 0.70 | Trading at steep discount to own history — strong value | +8 |
+| 0.70–0.90 | Moderately undervalued | +4 |
+| 0.90–1.15 | Fair value — near historical average | 0 |
+| 1.15–1.40 | Moderately overvalued | −4 |
+| > 1.40 | Significantly above historical average — priced for perfection | −8 |
 
-**CLI Scoring — Historical P/E vs Mean (max ±8 pts):**
-
-| P/E Ratio (Current / Mean) | Score Impact |
-|----------------------------|-------------|
-| < 0.70 | +8 (deep discount) |
-| 0.70–0.90 | +4 (mild discount) |
-| 0.90–1.15 | 0 (fair value) |
-| 1.15–1.40 | −4 (mild premium) |
-| > 1.40 | −8 (significant premium) |
+The CLI shows historical ranges for 1Y, 5Y, and 10Y with "▼ X% below — cheap" or "▲ X% above — expensive" labels.
 
 ### 5.2 Price to Book (P/B)
 
@@ -371,6 +333,8 @@ Most useful for capital-intensive businesses: banks, insurance, metals, cement.
 | 1–2x | Reasonable |
 | 2–5x | Premium for quality |
 | > 5x | Only justified for very high ROE businesses |
+
+**CLI threshold:** P/B > 5x raises a YELLOW flag.
 
 **Buffett rule**: Buy when P/B is low AND ROE is consistently high.
 
@@ -389,6 +353,8 @@ Preferred over P/E for capital-intensive or leveraged companies because it ignor
 | 8–15x | Reasonable |
 | 15–20x | Growth premium |
 | > 20x | Expensive |
+
+**CLI threshold:** EV/EBITDA > 20x raises a YELLOW flag.
 
 ### 5.4 PEG Ratio
 
@@ -417,7 +383,7 @@ Dividend Yield = Annual DPS / Market Price × 100
 
 ---
 
-## 6. Red Flag Checklist
+## 5. Red Flag Checklist
 
 ### 6.1 Balance Sheet Red Flags
 
@@ -434,13 +400,13 @@ Dividend Yield = Annual DPS / Market Price × 100
 - [ ] Revenue declining YoY
 - [ ] PAT declining while revenue growing (margin collapse)
 - [ ] Other Income > 20% of PBT (operating business weak)
-- [ ] EPS dilution despite PAT growth (fresh equity at bad valuations)
+- [ ] EPS dilution far larger than PAT dilution (heavy fresh equity at poor timing)
 - [ ] Exceptional/extraordinary items in 3+ consecutive quarters (normalizing the extraordinary)
 - [ ] Effective tax rate < 15% without clear explanation
 
 ### 6.3 Cash Flow Red Flags
 
-- [ ] Negative OCF with positive PAT
+- [ ] Negative OCF with positive PAT *(except financial sector — see Section 6.1)*
 - [ ] OCF declining 3+ consecutive quarters while PAT rises
 - [ ] Consistently negative FCF for 3+ years (capex-heavy without visible payoff)
 - [ ] Investing cash outflows > operating cash inflows without a clear capex story
@@ -468,11 +434,21 @@ Dividend Yield = Annual DPS / Market Price × 100
 
 ---
 
-## 7. Sector-Specific Notes
+## 6. Sector-Specific Notes
 
-### 7.1 Banking & NBFCs
+### 7.1 Banking, NBFCs & Housing Finance Companies
 
-**Key metrics (different from regular companies):**
+**The CLI automatically detects financial sector companies** (via yfinance sector tag) and applies sector-aware scoring:
+
+| Normal Check | Financial Sector Behaviour |
+|---|---|
+| OCF/PAT ratio | **Skipped** — loan disbursements are operating outflows by accounting convention |
+| Negative OCF flag | **Skipped** — normal for lenders |
+| Negative FCF flag | **Skipped** |
+| D/E ≤ 1.0 threshold | **Relaxed** to ≤ 5.0x (NBFC norm) |
+| D/E red flag at 2.0x | **Relaxed** to 8.0x |
+
+**Key metrics to use instead:**
 
 | Metric | What It Measures | Threshold |
 |--------|-----------------|-----------|
@@ -480,7 +456,6 @@ Dividend Yield = Annual DPS / Market Price × 100
 | GNPA / NNPA % | Gross / Net Non-Performing Assets | GNPA < 3%, NNPA < 1% |
 | PCR (Provision Coverage Ratio) | % of bad loans covered by provisions | > 70% |
 | CAR / CRAR | Capital Adequacy Ratio | > 15% |
-| Credit-Deposit Ratio | Lending intensity | 70–85% (optimal) |
 | ROA | Return on Assets | > 1.5% (banks) |
 | ROE | Return on Equity | > 15% |
 
@@ -562,77 +537,114 @@ Dividend Yield = Annual DPS / Market Price × 100
 
 ---
 
-## 8. Quantitative Scorecard Template
+## 7. Quantitative Scorecard — CLI Scoring Reference
 
-The CLI tool computes a 0–100 score automatically. Both sub-scores start at a neutral **50** and are adjusted up or down based on signals. The final score is:
+Both screeners start at a neutral **50** and are adjusted up or down. The final score is:
 
 ```
 Final Score = BasicScore × 40% + AdvancedScore × 60%
 ```
 
-### 8.1 Basic Score Components (40% weight)
+The CLI displays a **Score Breakdown panel** after the header showing every section's raw points, its weight, and its effective contribution to the final score. This makes it transparent why the score is what it is.
 
-Each component adjusts the starting score of 50:
+### 8.1 Basic Score Components (weight: 40%)
 
-| # | Parameter | Criteria | Max Points |
-|---|-----------|----------|-----------|
-| 1 | Revenue YoY Growth | >20%: +10 · 10–20%: +5 · 0–10%: 0 · <0%: −10 | ±10 |
-| 2 | PAT YoY Growth | >20%: +10 · 10–20%: +5 · 0–10%: 0 · <0%: −10 | ±10 |
-| 3 | EBITDA Margin + Trend | High margin + improving trend: +10 · low / deteriorating: −10 | ±10 |
-| 4 | OCF Quality (OCF/PAT) | >1.0: +15 · 0.75–1: +8 · 0.5–0.75: 0 · <0.5: −10 | ±15 |
-| 5 | EPS YoY Growth | >20%: +5 · 10–20%: +3 · <0%: −5 | ±5 |
-| 6 | Flags (RED/YELLOW/GREEN) | GREEN: +3 each · YELLOW: −2 each · RED: −5 each | variable |
+Starting score: **50**
 
-### 8.2 Advanced Score Components (60% weight)
+| Component | Criteria | Points |
+|-----------|----------|--------|
+| **Revenue YoY Growth** | ≥ 20%: +15 · ≥ 10%: +8 · ≥ 0%: +2 · < 0%: −15 | ±15 |
+| **PAT YoY Growth** | ≥ 20%: +15 · ≥ 10%: +8 · ≥ 0%: +2 · < 0%: −15 | ±15 |
+| **EBITDA Margin** | ≥ 20%: +10 · ≥ 10%: +5 · < 10%: −5 | ±10 |
+| **EBITDA Trend** | Improving: +5 · Stable: 0 · Deteriorating: −10 | ±10 |
+| **OCF/PAT Ratio** ¹ | ≥ 1.0: +10 · ≥ 0.75: +5 · ≥ 0: −5 · < 0: −15 | ±15 |
+| **Red Flag Penalty** | −5 per RED flag | variable |
 
-| # | Parameter | Criteria | Max Points |
-|---|-----------|----------|-----------|
-| 1 | ROE | >25%: +10 · 15–25%: +5 · 10–15%: 0 · <10%: −10 | ±10 |
-| 2 | ROCE | >20%: +8 · 12–20%: +4 · 8–12%: 0 · <8%: −8 | ±8 |
-| 3 | Debt/Equity Ratio | <0.3: +10 · 0.3–1: +5 · 1–2: −5 · >2: −15 | ±15 |
-| 4 | Interest Coverage | >5×: +5 · 3–5×: +2 · 1.5–3×: −3 · <1.5×: −8 | ±8 |
-| 5 | Net Debt / EBITDA | <1×: +5 · 1–2×: +2 · 2–3×: −2 · >3×: −5 | ±5 |
-| 6 | Promoter Pledge | 0%: +10 · <10%: +5 · 10–25%: −5 · >25%: −10 | ±10 |
-| 7 | **Promoter Holding Change** | QoQ >+1%: +6 · mild buy: +2 · mild sell: −3 · heavy sell: −8 | ±10 |
-| 8 | **FII Activity** | QoQ ≥+2%: +6 · ≥+1%: +3 · ≤−1%: −3 · ≤−2%: −6 | ±6 |
-| 9 | **DII Activity** | QoQ ≥ threshold: +3 · ≤ −threshold: −3 | ±3 |
-| 10 | **Historical P/E vs Mean** | <0.70×: +8 · 0.70–0.90×: +4 · 0.90–1.15×: 0 · 1.15–1.40×: −4 · >1.40×: −8 | ±8 |
-| 11 | FCF Trend | Positive + growing: +5 · stable: +2 · declining: −5 | ±5 |
-| 12 | Working Capital (Debtor+Inv days) | Improving: +3 · worsening: −3 | ±3 |
-| 13 | Revenue Quality Score | Internal signal (0–10 scale) | ±5 |
-| 14 | Red Flag Penalty | −5 per RED flag | variable |
+> ¹ OCF/PAT check is **skipped entirely** for financial sector companies (banks, NBFCs, HFCs, insurance). No points added or deducted.
 
-> **Bold rows** = factors added in the latest scoring update (FII/DII activity, promoter holding change QoQ, historical P/E vs mean).
+YoY growth uses **annual data** from screener.in (5 fiscal years) as the primary source, falling back to quarterly YoY averages when annual data is unavailable.
 
-### 8.3 Score Interpretation (CLI output)
+### 8.2 Advanced Score Components (weight: 60%)
 
-| Score | Rating | Action |
-|-------|--------|--------|
+Starting score: **50**
+
+| Component | Criteria | Points |
+|-----------|----------|--------|
+| **ROE** | ≥ 30%: +10 · ≥ 15%: +5 · < 15%: −5 | ±10 |
+| **ROCE** | ≥ 24%: +8 · ≥ 12%: +4 · < 12%: −4 | ±8 |
+| **D/E Ratio** ² | < 0.5: +12 · < 1.0: +6 · < 2.0: −6 · ≥ 2.0: −12 | ±12 |
+| **Interest Coverage** | ≥ 6x: +6 · ≥ 3x: +3 · < 3x: −6 | ±6 |
+| **FCF (latest qtr)** | Positive: +5 · Negative: −5 | ±5 |
+| **Promoter Pledge** | 0%: +5 · ≤ 10%: +2 · ≤ 25%: −5 · > 25%: −10 | ±10 |
+| **Pledge increase QoQ** | > 5% increase: −10 | −10 |
+| **Promoter Holding QoQ** | > +1%: +6 · > 0%: +2 · > −2%: −3 · ≤ −2%: −8 | ±8 |
+| **Promoter Holding 6Q** | > +2%: +2 · < −3%: −2 | ±2 |
+| **FII Activity QoQ** | ≥ +2%: +6 · ≥ +1%: +3 · ≤ −1%: −3 · ≤ −2%: −6 | ±6 |
+| **DII Activity QoQ** | ≥ +1%: +3 · ≤ −1%: −3 | ±3 |
+| **P/E Ratio** | < 15: +10 · < 40: +5 · < 60: −5 · ≥ 60: −10 | ±10 |
+| **PEG Ratio** ⁴ | < 0.75: +6 · ≤ 1.5: +3 · ≤ 2.5: −4 · > 2.5: −6 | ±6 |
+| **P/E vs 5Y Mean** ³ | < 0.70×: +8 · < 0.90×: +4 · ≤ 1.15×: 0 · ≤ 1.40×: −4 · > 1.40×: −8 | ±8 |
+| **Red Flag Penalty** | −5 per RED flag | variable |
+
+> ² Financial sector D/E thresholds: < 5.0: +6 · < 8.0: −6 · ≥ 8.0: −12 (relaxed for NBFCs/banks/HFCs)
+>
+> ³ Falls back to 1Y historical mean if 5Y data is unavailable.
+>
+> ⁴ PEG = P/E ÷ EPS YoY growth %. Only shown when both P/E and positive EPS growth are available. Not computed when EPS growth is negative (negative PEG is meaningless).
+
+### 8.3 Score Breakdown Panel (CLI output)
+
+The CLI prints a breakdown table after the header panel showing:
+
+```
+Component                        Raw        Wt    → Score
+────────────────────────────────────────────────────────
+Base (start of both screeners)    50         —      +50 pts
+────────────────────────────────────────────────────────
+Basic Screener  (×0.4)
+  Growth                         +30 pts    ×0.4   +12 pts
+  Profitability                  +10 pts    ×0.4    +4 pts
+  Cash Quality                    +0 pts    ×0.4    +0 pts
+  Penalties                       +0 pts    ×0.4    +0 pts
+────────────────────────────────────────────────────────
+Advanced Screener  (×0.6)
+  Profitability                   +9 pts    ×0.6    +5 pts
+  Debt Health                     +6 pts    ×0.6    +4 pts
+  Shareholding                    -8 pts    ×0.6    -5 pts
+  Valuation                      +18 pts    ×0.6   +11 pts
+  Penalties                       +0 pts    ×0.6    +0 pts
+════════════════════════════════════════════════════════
+TOTAL                                               +81 pts
+```
+
+Each section title in the report also shows its raw point contribution: `Growth Metrics  (+30 pts)`.
+
+### 8.4 Score Interpretation
+
+| Score | Rating | Suggested Action |
+|-------|--------|-----------------|
 | 80–100 | **STRONG BUY** | High conviction, size up position |
 | 60–79 | **BUY** | Good entry, standard position size |
 | 40–59 | **WATCH** | Monitor for improvement, don't buy yet |
 | 20–39 | **AVOID** | Multiple concerns, stay away |
 | < 20 | **SELL** | Consider exiting, serious red flags |
 
-### 8.4 Manual Scorecard (for offline use)
+### 8.5 Manual Scorecard (for offline use)
 
-| # | Parameter | Your Assessment | Score | Notes |
-|---|-----------|----------------|-------|-------|
-| 1 | Revenue Growth (YoY) | | /10 | |
-| 2 | PAT Growth (YoY) | | /10 | |
-| 3 | EBITDA Margin + Trend | | /10 | |
-| 4 | OCF Quality (OCF/PAT) | | /15 | |
-| 5 | ROE | | /10 | |
-| 6 | ROCE | | /8 | |
-| 7 | Debt Health (D/E + ICR) | | /15 | |
-| 8 | Promoter Pledge | | /10 | |
-| 9 | Promoter Holding Change (QoQ) | | /10 | |
-| 10 | FII/DII Activity | | /9 | |
-| 11 | Historical P/E vs Mean | | /8 | |
-| 12 | FCF Generation | | /5 | |
-| 13 | Audit Quality | Clean=0 · Emphasis=−3 · Qualified=−10 · Adverse=−25 | penalty | |
-| 14 | Red Flags (count) | | penalty | |
-| — | **TOTAL** | | **/120** | normalise to 100 |
+| # | Parameter | Your Assessment | Max | Notes |
+|---|-----------|----------------|-----|-------|
+| 1 | Revenue Growth YoY (3Y + 5Y avg) | | 15 | |
+| 2 | PAT Growth YoY (3Y + 5Y avg) | | 15 | |
+| 3 | EBITDA Margin + Trend | | 20 | |
+| 4 | OCF Quality (OCF/PAT ratio) | | 15 | Skip for financials |
+| 5 | ROE | | 10 | |
+| 6 | ROCE | | 8 | |
+| 7 | Debt Health (D/E + ICR + FCF) | | 18 | Adjust for financials |
+| 8 | Promoter Pledge + Holding Change | | 20 | |
+| 9 | FII + DII Activity | | 9 | |
+| 10 | Valuation (P/E + vs history) | | 18 | |
+| 11 | Red Flags (count) | | penalty | −5 per RED flag |
+| — | **TOTAL** | | **~120** | normalise to 100 |
 
 ---
 
@@ -640,11 +652,20 @@ Each component adjusts the starting score of 50:
 
 ### Must-Check 5 Things Every Quarter
 
-1. **OCF vs PAT** — Did cash flow match profit? (OCF/PAT < 0.5 = investigate)
-2. **Promoter Pledge** — Did pledge % go up? (Any increase = flag)
-3. **Debtor Days** — Are customers paying faster or slower?
+1. **OCF vs PAT** — Did cash flow match profit? (OCF/PAT < 0.5 = investigate; skip for NBFCs/banks)
+2. **Promoter Pledge** — Did pledge % go up? (Any increase = flag; > 5% QoQ = RED)
+3. **Debtor Days** — Are customers paying faster or slower? (> 90 days = YELLOW)
 4. **Audit Opinion** — Any qualifications or emphasis of matter?
 5. **Debt + Interest Coverage** — Can company service its debt comfortably?
+
+### 3Y vs 5Y YoY — Reading the Growth Story
+
+| Pattern | What It Means |
+|---------|---------------|
+| 3Y >> 5Y | Growth accelerating — business momentum building |
+| 3Y ≈ 5Y | Consistent compounder |
+| 3Y << 5Y | Growth fading — high base effect or business slowdown |
+| PAT 5Y high, EPS 5Y low | Heavy equity dilution over 5 years — check if capital deployed well |
 
 ### Sources for Indian Stock Data
 

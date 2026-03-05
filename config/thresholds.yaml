@@ -41,6 +41,12 @@ working_capital:
   inventory_days_max: 120         # Maximum inventory days
   debtor_days_increase_alert: 30  # Alert if debtor days increased by this
 
+financial_sector:
+  # NBFCs, banks, HFCs, insurance — lending IS operations, so negative OCF is normal
+  de_ratio_max: 5.0               # Normal leverage for NBFCs/HFCs
+  de_ratio_red: 8.0               # Red flag leverage
+  ocf_checks_applicable: false    # OCF/PAT ratio and FCF checks are not meaningful
+
 contingent_liabilities:
   net_worth_ratio_max: 0.5        # Contingent liabilities > 50% net worth = RED
 

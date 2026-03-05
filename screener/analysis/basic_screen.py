@@ -11,6 +11,16 @@ import pandas as pd
 import yaml
 
 
+_FINANCIAL_KEYWORDS = ("financial", "bank", "nbfc", "insurance", "lending", "housing finance", "asset management")
+
+
+def _is_financial(sector: Optional[str]) -> bool:
+    if not sector:
+        return False
+    s = sector.lower()
+    return any(kw in s for kw in _FINANCIAL_KEYWORDS)
+
+
 def _load_cfg() -> dict:
     return yaml.safe_load(
         (Path(__file__).parent.parent.parent / "config" / "thresholds.yaml").read_text()
@@ -38,11 +48,14 @@ class BasicScreenResult:
     symbol: str
     # Growth metrics
     revenue_qoq_pct: Optional[float] = None
-    revenue_yoy_pct: Optional[float] = None
+    revenue_yoy_pct: Optional[float] = None       # avg YoY over 5Y
+    revenue_yoy_3y_pct: Optional[float] = None    # avg YoY over 3Y
     pat_qoq_pct: Optional[float] = None
     pat_yoy_pct: Optional[float] = None
+    pat_yoy_3y_pct: Optional[float] = None
     eps_qoq_pct: Optional[float] = None
     eps_yoy_pct: Optional[float] = None
+    eps_yoy_3y_pct: Optional[float] = None
     # Margin
     ebitda_margin_latest_pct: Optional[float] = None
     ebitda_margin_trend: Optional[str] = None  # improving | stable | deteriorating
@@ -65,6 +78,7 @@ class BasicScreenResult:
     # Flags and score
     flags: list[ScreenFlag] = field(default_factory=list)
     score: int = 0
+    score_breakdown: dict = field(default_factory=dict)  # section → points
 
 
 def _safe_pct_change(series: pd.Series, periods: int = 1) -> Optional[float]:
@@ -198,6 +212,7 @@ class BasicScreener:
         si_quarterly_df: Optional[pd.DataFrame] = None,
         si_annual_df: Optional[pd.DataFrame] = None,
         si_cashflow_df: Optional[pd.DataFrame] = None,
+        sector: Optional[str] = None,
     ) -> BasicScreenResult:
         """
         si_quarterly_df (screener.in) is used as the PRIMARY source for Revenue/PAT/EPS/margin.
@@ -235,6 +250,7 @@ class BasicScreener:
             # YoY: prefer annual data (last 5 fiscal years), fall back to quarterly
             ann_rev = _si_row_series(si_annual_df, ["Sales", "Revenue"]) if ann_ok else None
             result.revenue_yoy_pct = _avg_qoq_pct(ann_rev, 5) if (ann_rev is not None and not ann_rev.dropna().empty) else _avg_yoy_pct(rev, 5)
+            result.revenue_yoy_3y_pct = _avg_qoq_pct(ann_rev, 3) if (ann_rev is not None and not ann_rev.dropna().empty) else _avg_yoy_pct(rev, 3)
 
         # ── PAT / Net Profit ───────────────────────────────────────────────
         if si_ok:
@@ -252,6 +268,7 @@ class BasicScreener:
             result.pat_qoq_pct = _avg_qoq_pct(pat, 5)
             ann_pat = _si_row_series(si_annual_df, ["Net Profit", "PAT"]) if ann_ok else None
             result.pat_yoy_pct = _avg_qoq_pct(ann_pat, 5) if (ann_pat is not None and not ann_pat.dropna().empty) else _avg_yoy_pct(pat, 5)
+            result.pat_yoy_3y_pct = _avg_qoq_pct(ann_pat, 3) if (ann_pat is not None and not ann_pat.dropna().empty) else _avg_yoy_pct(pat, 3)
 
         # ── EPS ────────────────────────────────────────────────────────────
         if si_ok:
@@ -267,6 +284,7 @@ class BasicScreener:
             result.eps_qoq_pct = _avg_qoq_pct(eps, 5)
             ann_eps = _si_row_series(si_annual_df, ["EPS in Rs", "EPS"]) if ann_ok else None
             result.eps_yoy_pct = _avg_qoq_pct(ann_eps, 5) if (ann_eps is not None and not ann_eps.dropna().empty) else _avg_yoy_pct(eps, 5)
+            result.eps_yoy_3y_pct = _avg_qoq_pct(ann_eps, 3) if (ann_eps is not None and not ann_eps.dropna().empty) else _avg_yoy_pct(eps, 3)
 
         # ── EBITDA / Operating margin ──────────────────────────────────────
         if si_ok:
@@ -327,8 +345,8 @@ class BasicScreener:
                         result.ocf_pat_ratio = result.si_ocf_pat_ratio
 
         # --- Flags ---
-        self._apply_flags(result, cfg_g, cfg_p, income_df, cashflow_df)
-        result.score = self._compute_score(result, cfg_g, cfg_p)
+        self._apply_flags(result, cfg_g, cfg_p, income_df, cashflow_df, sector=sector)
+        result.score = self._compute_score(result, cfg_g, cfg_p, sector=sector)
         return result
 
     def _apply_flags(
@@ -338,7 +356,9 @@ class BasicScreener:
         cfg_p: dict,
         income_df: pd.DataFrame,
         cashflow_df: Optional[pd.DataFrame],
+        sector: Optional[str] = None,
     ) -> None:
+        financial = _is_financial(sector)
         # Revenue growth
         if result.revenue_yoy_pct is not None:
             if result.revenue_yoy_pct < 0:
@@ -375,76 +395,75 @@ class BasicScreener:
         elif result.ebitda_margin_trend == "improving":
             result.flags.append(ScreenFlag(FlagLevel.GREEN, "Margin", "EBITDA margin improving trend"))
 
-        # OCF quality
-        if result.ocf_pat_ratio is not None:
-            if result.ocf_pat_ratio < 0:
-                result.flags.append(ScreenFlag(FlagLevel.RED, "CashQuality", f"Negative OCF despite PAT: OCF/PAT = {result.ocf_pat_ratio:.2f}"))
-            elif result.ocf_pat_ratio < cfg_p["ocf_pat_ratio_min"]:
-                result.flags.append(ScreenFlag(FlagLevel.YELLOW, "CashQuality", f"Low OCF/PAT ratio: {result.ocf_pat_ratio:.2f} (min {cfg_p['ocf_pat_ratio_min']})"))
-            else:
-                result.flags.append(ScreenFlag(FlagLevel.GREEN, "CashQuality", f"Strong OCF quality: {result.ocf_pat_ratio:.2f}x"))
+        # OCF quality — not applicable for financial sector (lending = negative OCF by nature)
+        if financial:
+            result.flags.append(ScreenFlag(FlagLevel.GREEN, "CashQuality", "Financial sector — OCF/FCF checks not applicable (loan disbursements are operating cash outflows)"))
+        else:
+            if result.ocf_pat_ratio is not None:
+                if result.ocf_pat_ratio < 0:
+                    result.flags.append(ScreenFlag(FlagLevel.RED, "CashQuality", f"Negative OCF despite PAT: OCF/PAT = {result.ocf_pat_ratio:.2f}"))
+                elif result.ocf_pat_ratio < cfg_p["ocf_pat_ratio_min"]:
+                    result.flags.append(ScreenFlag(FlagLevel.YELLOW, "CashQuality", f"Low OCF/PAT ratio: {result.ocf_pat_ratio:.2f} (min {cfg_p['ocf_pat_ratio_min']})"))
+                else:
+                    result.flags.append(ScreenFlag(FlagLevel.GREEN, "CashQuality", f"Strong OCF quality: {result.ocf_pat_ratio:.2f}x"))
 
-        # PAT rising + OCF declining = earnings quality concern
-        if result.pat_yoy_pct is not None and result.pat_yoy_pct > 10:
-            ocf_trend_check = result.si_ocf_trend or result.ocf_trend
-            if ocf_trend_check == "deteriorating":
-                result.flags.append(ScreenFlag(FlagLevel.RED, "CashQuality", "PAT rising but OCF declining — earnings quality concern"))
+            # PAT rising + OCF declining = earnings quality concern
+            if result.pat_yoy_pct is not None and result.pat_yoy_pct > 10:
+                ocf_trend_check = result.si_ocf_trend or result.ocf_trend
+                if ocf_trend_check == "deteriorating":
+                    result.flags.append(ScreenFlag(FlagLevel.RED, "CashQuality", "PAT rising but OCF declining — earnings quality concern"))
 
-        # Negative FCF flag
-        if result.si_fcf_annual is not None and result.si_fcf_annual < 0:
-            result.flags.append(ScreenFlag(FlagLevel.YELLOW, "CashQuality", f"Negative FCF: ₹{result.si_fcf_annual:,.0f} Cr — investing more than operating cash generated"))
+            # Negative FCF flag
+            if result.si_fcf_annual is not None and result.si_fcf_annual < 0:
+                result.flags.append(ScreenFlag(FlagLevel.YELLOW, "CashQuality", f"Negative FCF: ₹{result.si_fcf_annual:,.0f} Cr — investing more than operating cash generated"))
 
-    def _compute_score(self, result: BasicScreenResult, cfg_g: dict, cfg_p: dict) -> int:
-        score = 50  # Start neutral
+    def _compute_score(self, result: BasicScreenResult, cfg_g: dict, cfg_p: dict, sector: Optional[str] = None) -> int:
+        financial = _is_financial(sector)
+        score = 50
+        bd: dict = {"growth": 0, "profitability": 0, "cash_quality": 0, "penalties": 0}
 
-        # Revenue growth contribution (max ±15)
+        # Revenue growth (max ±15)
         if result.revenue_yoy_pct is not None:
-            if result.revenue_yoy_pct >= cfg_g["revenue_yoy_min_pct"] * 2:
-                score += 15
-            elif result.revenue_yoy_pct >= cfg_g["revenue_yoy_min_pct"]:
-                score += 8
-            elif result.revenue_yoy_pct >= 0:
-                score += 2
-            else:
-                score -= 15
+            pts = 15 if result.revenue_yoy_pct >= cfg_g["revenue_yoy_min_pct"] * 2 else \
+                   8 if result.revenue_yoy_pct >= cfg_g["revenue_yoy_min_pct"] else \
+                   2 if result.revenue_yoy_pct >= 0 else -15
+            score += pts
+            bd["growth"] += pts
 
-        # PAT growth contribution (max ±15)
+        # PAT growth (max ±15)
         if result.pat_yoy_pct is not None:
-            if result.pat_yoy_pct >= cfg_g["pat_yoy_min_pct"] * 2:
-                score += 15
-            elif result.pat_yoy_pct >= cfg_g["pat_yoy_min_pct"]:
-                score += 8
-            elif result.pat_yoy_pct >= 0:
-                score += 2
-            else:
-                score -= 15
+            pts = 15 if result.pat_yoy_pct >= cfg_g["pat_yoy_min_pct"] * 2 else \
+                   8 if result.pat_yoy_pct >= cfg_g["pat_yoy_min_pct"] else \
+                   2 if result.pat_yoy_pct >= 0 else -15
+            score += pts
+            bd["growth"] += pts
 
         # EBITDA margin (max ±10)
         if result.ebitda_margin_latest_pct is not None:
-            if result.ebitda_margin_latest_pct >= 20:
-                score += 10
-            elif result.ebitda_margin_latest_pct >= cfg_p["ebitda_margin_min_pct"]:
-                score += 5
-            else:
-                score -= 5
+            pts = 10 if result.ebitda_margin_latest_pct >= 20 else \
+                   5 if result.ebitda_margin_latest_pct >= cfg_p["ebitda_margin_min_pct"] else -5
+            score += pts
+            bd["profitability"] += pts
         if result.ebitda_margin_trend == "improving":
             score += 5
+            bd["profitability"] += 5
         elif result.ebitda_margin_trend == "deteriorating":
             score -= 10
+            bd["profitability"] -= 10
 
-        # OCF quality (max ±10)
-        if result.ocf_pat_ratio is not None:
-            if result.ocf_pat_ratio >= 1.0:
-                score += 10
-            elif result.ocf_pat_ratio >= cfg_p["ocf_pat_ratio_min"]:
-                score += 5
-            elif result.ocf_pat_ratio >= 0:
-                score -= 5
-            else:
-                score -= 15  # Negative OCF is bad
+        # OCF quality (max ±15) — skipped for financial sector
+        if not financial and result.ocf_pat_ratio is not None:
+            pts = 10 if result.ocf_pat_ratio >= 1.0 else \
+                   5 if result.ocf_pat_ratio >= cfg_p["ocf_pat_ratio_min"] else \
+                  -5 if result.ocf_pat_ratio >= 0 else -15
+            score += pts
+            bd["cash_quality"] += pts
 
-        # Penalty for each RED flag
+        # Red flag penalties
         red_count = sum(1 for f in result.flags if f.level == FlagLevel.RED)
-        score -= red_count * 5
+        penalty = red_count * 5
+        score -= penalty
+        bd["penalties"] = -penalty
 
+        result.score_breakdown = bd
         return max(0, min(100, score))

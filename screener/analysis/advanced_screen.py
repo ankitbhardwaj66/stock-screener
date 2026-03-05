@@ -8,7 +8,7 @@ from typing import Optional
 import pandas as pd
 import yaml
 
-from screener.analysis.basic_screen import FlagLevel, ScreenFlag
+from screener.analysis.basic_screen import FlagLevel, ScreenFlag, _is_financial
 
 
 def _load_cfg() -> dict:
@@ -31,6 +31,7 @@ class AdvancedScreenResult:
     pe_ratio: Optional[float] = None
     pb_ratio: Optional[float] = None
     ev_ebitda: Optional[float] = None
+    peg_ratio: Optional[float] = None
     # Shareholding
     promoter_holding_pct: Optional[float] = None
     promoter_pledge_pct: Optional[float] = None
@@ -78,6 +79,7 @@ class AdvancedScreenResult:
     flags: list[ScreenFlag] = field(default_factory=list)
     red_flag_count: int = 0
     score: int = 0
+    score_breakdown: dict = field(default_factory=dict)  # section → points
 
 
 def _find_col(df: pd.DataFrame, keywords: list[str]) -> Optional[str]:
@@ -147,13 +149,20 @@ class AdvancedScreener:
         si_ratios: Optional[dict],
         historical_pe: Optional[dict] = None,
         si_wc_ratios: Optional[dict] = None,
+        sector: Optional[str] = None,
+        eps_yoy_pct: Optional[float] = None,
     ) -> AdvancedScreenResult:
         result = AdvancedScreenResult(symbol=symbol)
-        cfg_d = self.cfg["debt"]
+        financial = _is_financial(sector)
+        # Use relaxed D/E thresholds for financial sector (leverage is core to their model)
+        cfg_d = self.cfg["financial_sector"] if financial else self.cfg["debt"]
         cfg_v = self.cfg["valuation"]
         cfg_s = self.cfg["shareholding"]
 
         self._fill_ratios(result, price_info, si_ratios)
+        # PEG = P/E / EPS growth rate — computed after pe_ratio is filled
+        if result.pe_ratio and result.pe_ratio > 0 and eps_yoy_pct and eps_yoy_pct > 0:
+            result.peg_ratio = round(result.pe_ratio / eps_yoy_pct, 2)
         self._fill_debt(result, balance_df, income_df)
         self._fill_shareholding(result, shareholding)
         self._fill_working_capital(result, balance_df, income_df)
@@ -429,6 +438,17 @@ class AdvancedScreener:
         if result.ev_ebitda is not None and result.ev_ebitda > cfg_v["ev_ebitda_max"]:
             result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Valuation", f"High EV/EBITDA: {result.ev_ebitda:.1f}x (max {cfg_v['ev_ebitda_max']}x)"))
 
+        if result.peg_ratio is not None:
+            peg_max = cfg_v["peg_max"]
+            if result.peg_ratio < 0.75:
+                result.flags.append(ScreenFlag(FlagLevel.GREEN, "Valuation", f"PEG {result.peg_ratio:.2f} — growth on sale (< 0.75)"))
+            elif result.peg_ratio <= peg_max:
+                result.flags.append(ScreenFlag(FlagLevel.GREEN, "Valuation", f"PEG {result.peg_ratio:.2f} — fair value vs growth"))
+            elif result.peg_ratio <= 2.5:
+                result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Valuation", f"PEG {result.peg_ratio:.2f} — expensive relative to growth (max {peg_max})"))
+            else:
+                result.flags.append(ScreenFlag(FlagLevel.RED, "Valuation", f"PEG {result.peg_ratio:.2f} — very expensive vs growth"))
+
         # --- P/E vs historical mean ---
         if result.pe_ratio and result.pe_ratio > 0 and result.pe_mean_historical:
             ratio = result.pe_ratio / result.pe_mean_historical
@@ -480,76 +500,114 @@ class AdvancedScreener:
     ) -> int:
         cfg_prof = self.cfg["profitability"]
         score = 50
+        bd: dict = {"profitability": 0, "debt": 0, "shareholding": 0, "valuation": 0, "penalties": 0}
 
         # ROE (max ±10)
         if result.roe_pct is not None:
-            if result.roe_pct >= cfg_prof["roe_min_pct"] * 2:
-                score += 10
-            elif result.roe_pct >= cfg_prof["roe_min_pct"]:
-                score += 5
-            else:
-                score -= 5
+            pts = 10 if result.roe_pct >= cfg_prof["roe_min_pct"] * 2 else \
+                   5 if result.roe_pct >= cfg_prof["roe_min_pct"] else -5
+            score += pts
+            bd["profitability"] += pts
 
         # ROCE (max ±8)
         if result.roce_pct is not None:
-            if result.roce_pct >= cfg_prof["roce_min_pct"] * 2:
-                score += 8
-            elif result.roce_pct >= cfg_prof["roce_min_pct"]:
-                score += 4
-            else:
-                score -= 4
+            pts = 8 if result.roce_pct >= cfg_prof["roce_min_pct"] * 2 else \
+                  4 if result.roce_pct >= cfg_prof["roce_min_pct"] else -4
+            score += pts
+            bd["profitability"] += pts
 
-        # Debt health (max ±12)
+        # D/E ratio (max ±12)
         if result.de_ratio is not None:
-            if result.de_ratio < 0.5:
-                score += 12
-            elif result.de_ratio < cfg_d["de_ratio_max"]:
-                score += 6
-            elif result.de_ratio < cfg_d["de_ratio_red"]:
-                score -= 6
-            else:
-                score -= 12
+            pts = 12 if result.de_ratio < 0.5 else \
+                   6 if result.de_ratio < cfg_d["de_ratio_max"] else \
+                  -6 if result.de_ratio < cfg_d["de_ratio_red"] else -12
+            score += pts
+            bd["debt"] += pts
 
+        # Interest coverage (max ±6)
         if result.interest_coverage is not None:
-            if result.interest_coverage >= cfg_d["interest_coverage_min"] * 2:
-                score += 6
-            elif result.interest_coverage >= cfg_d["interest_coverage_min"]:
-                score += 3
-            else:
-                score -= 6
+            pts = 6 if result.interest_coverage >= cfg_d.get("interest_coverage_min", 3) * 2 else \
+                  3 if result.interest_coverage >= cfg_d.get("interest_coverage_min", 3) else -6
+            score += pts
+            bd["debt"] += pts
 
-        # Promoter activity (max ±10)
+        # FCF (max ±5)
+        if result.fcf_latest is not None:
+            pts = 5 if result.fcf_latest > 0 else -5
+            score += pts
+            bd["debt"] += pts
+
+        # Promoter pledge (max ±10)
         if result.promoter_pledge_pct is not None:
-            if result.promoter_pledge_pct == 0:
-                score += 5
-            elif result.promoter_pledge_pct <= cfg_s["promoter_pledge_max_pct"]:
-                score += 2
-            elif result.promoter_pledge_pct <= cfg_s["promoter_pledge_red_pct"]:
-                score -= 5
-            else:
-                score -= 10
+            pts = 5 if result.promoter_pledge_pct == 0 else \
+                  2 if result.promoter_pledge_pct <= cfg_s["promoter_pledge_max_pct"] else \
+                 -5 if result.promoter_pledge_pct <= cfg_s["promoter_pledge_red_pct"] else -10
+            score += pts
+            bd["shareholding"] += pts
         if result.pledge_delta and result.pledge_delta > cfg_s["promoter_pledge_increase_alert"]:
             score -= 10
+            bd["shareholding"] -= 10
 
-        # Valuation (max ±10)
+        # Promoter holding QoQ (max ±8)
+        if result.promoter_holding_delta is not None:
+            pts = 6 if result.promoter_holding_delta > 1.0 else \
+                  2 if result.promoter_holding_delta > 0 else \
+                 -8 if result.promoter_holding_delta < -cfg_s["promoter_holding_decrease_alert"] else -3
+            score += pts
+            bd["shareholding"] += pts
+        # 6Q trend reinforces signal
+        if result.promoter_holding_6q_delta is not None:
+            pts = 2 if result.promoter_holding_6q_delta > 2.0 else \
+                 -2 if result.promoter_holding_6q_delta < -3.0 else 0
+            score += pts
+            bd["shareholding"] += pts
+
+        # FII activity (max ±6)
+        if result.fii_holding_delta is not None:
+            pts = 6 if result.fii_holding_delta >= cfg_s["fii_increase_min_pct"] * 2 else \
+                  3 if result.fii_holding_delta >= cfg_s["fii_increase_min_pct"] else \
+                 -6 if result.fii_holding_delta <= -cfg_s["fii_increase_min_pct"] * 2 else \
+                 -3 if result.fii_holding_delta <= -cfg_s["fii_increase_min_pct"] else 0
+            score += pts
+            bd["shareholding"] += pts
+        # DII (max ±3)
+        if result.dii_holding_delta is not None:
+            pts = 3 if result.dii_holding_delta >= cfg_s["fii_increase_min_pct"] else \
+                 -3 if result.dii_holding_delta <= -cfg_s["fii_increase_min_pct"] else 0
+            score += pts
+            bd["shareholding"] += pts
+
+        # P/E ratio (max ±10)
         if result.pe_ratio is not None and result.pe_ratio > 0:
-            if result.pe_ratio < 15:
-                score += 10
-            elif result.pe_ratio < cfg_v["pe_max"]:
-                score += 5
-            elif result.pe_ratio < cfg_v["pe_red"]:
-                score -= 5
-            else:
-                score -= 10
+            pts = 10 if result.pe_ratio < 15 else \
+                   5 if result.pe_ratio < cfg_v["pe_max"] else \
+                  -5 if result.pe_ratio < cfg_v["pe_red"] else -10
+            score += pts
+            bd["valuation"] += pts
 
-        # FCF
-        if result.fcf_latest is not None:
-            if result.fcf_latest > 0:
-                score += 5
-            else:
-                score -= 5
+        # PEG ratio (max ±6)
+        if result.peg_ratio is not None and result.peg_ratio > 0:
+            pts = 6 if result.peg_ratio < 0.75 else \
+                  3 if result.peg_ratio <= cfg_v["peg_max"] else \
+                 -4 if result.peg_ratio <= 2.5 else -6
+            score += pts
+            bd["valuation"] += pts
+
+        # Historical P/E vs mean (max ±8)
+        pe_mean_ref = result.pe_mean_5y or result.pe_mean_historical
+        if result.pe_ratio and result.pe_ratio > 0 and pe_mean_ref and pe_mean_ref > 0:
+            ratio = result.pe_ratio / pe_mean_ref
+            pts = 8 if ratio < 0.70 else \
+                  4 if ratio < 0.90 else \
+                  0 if ratio <= 1.15 else \
+                 -4 if ratio <= 1.40 else -8
+            score += pts
+            bd["valuation"] += pts
 
         # Red flag penalty
-        score -= result.red_flag_count * self.cfg["scoring"]["weights"]["red_flag_penalty"] * -1
+        penalty = result.red_flag_count * self.cfg["scoring"]["weights"]["red_flag_penalty"] * -1
+        score -= penalty
+        bd["penalties"] = -penalty
 
+        result.score_breakdown = bd
         return max(0, min(100, score))
