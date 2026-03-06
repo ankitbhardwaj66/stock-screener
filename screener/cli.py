@@ -27,16 +27,13 @@ def _screen_symbol(
     advanced_screener,
 ) -> tuple:
     """Fetch + screen a single symbol. Returns (basic, advanced, price_info, price_trend)."""
-    # Fetch yfinance data
+    # yfinance: price data only
     yf_data = yf_fetcher.fetch_all(symbol)
     price_info = yf_data.get("price_info")
-    income_df = yf_data.get("quarterly_income")
-    balance_df = yf_data.get("quarterly_balance")
-    cashflow_df = yf_data.get("quarterly_cashflow")
     historical_pe = yf_data.get("historical_pe")
     price_trend = yf_data.get("price_trend")
 
-    # Fetch screener.in data (graceful degradation on failure)
+    # screener.in: all financial data
     si_data = si_fetcher.fetch_all(symbol)
     shareholding = si_data.get("shareholding")
     si_ratios = si_data.get("ratios")
@@ -44,13 +41,18 @@ def _screen_symbol(
     si_quarterly = si_data.get("quarterly_results")
     si_annual = si_data.get("annual_results")
     si_cashflow = si_data.get("cash_flow")
+    si_balance = si_data.get("balance_sheet")
 
     sector = price_info.get("sector") if price_info else None
-    basic = basic_screener.screen(symbol, income_df, cashflow_df, si_quarterly_df=si_quarterly, si_annual_df=si_annual, si_cashflow_df=si_cashflow, sector=sector)
+    basic = basic_screener.screen(
+        symbol, si_quarterly_df=si_quarterly, si_annual_df=si_annual,
+        si_cashflow_df=si_cashflow, sector=sector,
+    )
     advanced = advanced_screener.screen(
-        symbol, price_info, balance_df, income_df, cashflow_df, shareholding, si_ratios,
-        historical_pe=historical_pe, si_wc_ratios=si_wc_ratios, sector=sector,
-        eps_yoy_pct=basic.eps_yoy_pct,
+        symbol, price_info, shareholding, si_ratios,
+        historical_pe=historical_pe, si_wc_ratios=si_wc_ratios,
+        si_balance_df=si_balance, si_annual_df=si_annual,
+        sector=sector, eps_yoy_pct=basic.eps_yoy_pct, pat_yoy_pct=basic.pat_yoy_pct,
     )
     return basic, advanced, price_info, price_trend
 
@@ -277,6 +279,96 @@ def clear_cache(
         console.print(f"[green]Cleared {count} cached file(s) for {symbol}[/green]")
     else:
         console.print(f"[green]Cleared {count} cached file(s)[/green]")
+
+
+@app.command("sync-sheet")
+def sync_sheet(
+    spreadsheet_id: str = typer.Argument(..., help="Google Sheets ID (from the URL)"),
+    credentials: str = typer.Option(..., "--credentials", "-c", envvar="GOOGLE_SHEETS_CREDENTIALS", help="Path to service account JSON key file"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass cache and fetch fresh data"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print what would be written without updating the sheet"),
+) -> None:
+    """Scan stocks from a Google Sheet and write scores back to column C.
+
+    Symbols are read from column B. Scores are written to column C in the
+    format '42 - WATCH' (first run) or '42 (+7) - WATCH' (subsequent runs).
+
+    Example:
+        python -m screener sync-sheet 1BZ3aQjsJXp8cK50SW_Shrs9Lsnt2UcQlaR_HVlpPFLY --credentials service_account.json
+    """
+    from screener.data.yfinance_fetcher import YFinanceFetcher, CacheManager
+    from screener.data.screener_in import ScreenerInFetcher
+    from screener.analysis.basic_screen import BasicScreener
+    from screener.analysis.advanced_screen import AdvancedScreener
+    from screener.reports.formatter import _combined_score, _score_label
+    from screener.integrations.google_sheets import SheetSyncer, make_comment
+
+    # ── Connect to sheet ────────────────────────────────────────────────
+    console.print(f"[bold]Connecting to Google Sheet…[/bold]")
+    try:
+        syncer = SheetSyncer(credentials, spreadsheet_id)
+        rows = syncer.read_rows()
+    except Exception as e:
+        console.print(f"[red]Failed to connect to Google Sheet: {e}[/red]")
+        raise typer.Exit(1)
+
+    if not rows:
+        console.print("[yellow]No symbols found in column B.[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"[green]Found {len(rows)} symbol(s) to scan.[/green]\n")
+
+    # ── Screen each symbol ──────────────────────────────────────────────
+    cache = CacheManager()
+    yf_fetcher = YFinanceFetcher(cache)
+    si_fetcher = ScreenerInFetcher(cache)
+    basic_screener = BasicScreener()
+    advanced_screener = AdvancedScreener()
+
+    updates: list[tuple[int, int, str]] = []
+
+    for sheet_row in rows:
+        sym = sheet_row.ns_symbol
+        if no_cache:
+            cache.clear(sym)
+        with Progress(SpinnerColumn(), TextColumn(f"[progress.description]Screening {sym}…"), transient=True) as progress:
+            progress.add_task("", total=None)
+            try:
+                basic, advanced, _, _ = _screen_symbol(
+                    sym, yf_fetcher, si_fetcher, basic_screener, advanced_screener
+                )
+                # Treat zero score with no data as a fetch failure
+                if basic.score == 0 and not any(f for f in basic.flags if f.category != "Data"):
+                    raise ValueError("No financial data returned from screener.in")
+                score = int(_combined_score(basic, advanced))
+                label, _ = _score_label(score)
+                comment = make_comment(score, label, sheet_row.prev_score)
+                updates.append((sheet_row.row_num, score, comment))
+
+                change_str = ""
+                if sheet_row.prev_score is not None and sheet_row.prev_score != score:
+                    delta = score - sheet_row.prev_score
+                    sign = "+" if delta > 0 else ""
+                    change_str = f" [dim](was {sheet_row.prev_score}, {sign}{delta})[/dim]"
+
+                console.print(f"  [cyan]{sheet_row.symbol:<16}[/cyan] → [bold]{score}[/bold]  {comment}{change_str}")
+            except Exception as e:
+                console.print(f"\n[red]ERROR screening {sym}: {e}[/red]")
+                console.print(f"[red]Aborting — no scores written to sheet.[/red]")
+                raise typer.Exit(1)
+
+    # ── Write back ──────────────────────────────────────────────────────
+    if dry_run:
+        console.print(f"\n[yellow]Dry run — {len(updates)} update(s) not written to sheet.[/yellow]")
+    elif updates:
+        console.print(f"\n[bold]Writing {len(updates)} score(s) to Google Sheet…[/bold]")
+        try:
+            syncer.write_scores(updates)
+            console.print(f"[green]Done. {len(updates)} score(s) written.[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to write to sheet: {e}[/red]")
+            raise typer.Exit(1)
+
 
 
 @app.command()

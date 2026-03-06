@@ -26,6 +26,13 @@ pip install --quiet --upgrade pip
 pip install --quiet -r "$REQUIREMENTS"
 
 # --- Run screener ---
-echo "[run] Screening $1..."
-echo "---"
-python -m screener screen "$@"
+_SUBCOMMANDS="screen|scan|sync-sheet|clear-cache|version"
+if [[ "$1" =~ ^(scan|sync-sheet|clear-cache|version)$ ]]; then
+  echo "[run] Running $1..."
+  echo "---"
+  python -m screener "$@"
+else
+  echo "[run] Screening $1..."
+  echo "---"
+  python -m screener screen "$@"
+fi

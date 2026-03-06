@@ -12,7 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from screener.analysis.basic_screen import BasicScreenResult, FlagLevel, ScreenFlag
+from screener.analysis.basic_screen import BasicScreenResult, FlagLevel, ScreenFlag, _is_financial
 from screener.analysis.advanced_screen import AdvancedScreenResult
 from screener.data.pdf_scanner import AuditScanResult
 
@@ -133,6 +133,13 @@ def print_stock_report(
 
     BW, AW = 0.4, 0.6
     base_final = round(50 * BW) + round(50 * AW)  # = 50
+    def _penalty_flag_lines(flags: list, weight: float) -> list[str]:
+        lines = []
+        for msg in flags:
+            short = msg[:60] + "…" if len(msg) > 60 else msg
+            lines.append(f"    [dim red]↳ −5 pts × {weight}: {short}[/dim red]")
+        return lines
+
     bd_rows = [
         f"  {'Component':<32} {'Raw':>7}        {'Wt':>5}   {'→ Score':>8}",
         "  " + "─" * 58,
@@ -143,6 +150,7 @@ def print_stock_report(
         _row_str("  Profitability", bbd.get("profitability", 0), f"×{BW}", _eff(bbd.get("profitability", 0), BW)),
         _row_str("  Cash Quality", bbd.get("cash_quality", 0), f"×{BW}", _eff(bbd.get("cash_quality", 0), BW)),
         _row_str("  Penalties", bbd.get("penalties", 0), f"×{BW}", _eff(bbd.get("penalties", 0), BW)),
+        *_penalty_flag_lines(bbd.get("penalty_flags", []), BW),
         "  " + "─" * 58,
         f"  [dim]Advanced Screener  (×{AW})[/dim]",
         _row_str("  Profitability", abd.get("profitability", 0), f"×{AW}", _eff(abd.get("profitability", 0), AW)),
@@ -150,6 +158,7 @@ def print_stock_report(
         _row_str("  Shareholding", abd.get("shareholding", 0), f"×{AW}", _eff(abd.get("shareholding", 0), AW)),
         _row_str("  Valuation", abd.get("valuation", 0), f"×{AW}", _eff(abd.get("valuation", 0), AW)),
         _row_str("  Penalties", abd.get("penalties", 0), f"×{AW}", _eff(abd.get("penalties", 0), AW)),
+        *_penalty_flag_lines(abd.get("penalty_flags", []), AW),
         "  " + "═" * 58,
         f"  {'TOTAL':<32} {'':>7}        {'':>5}   [bold {label_style}]+{total_score:>4} pts[/bold {label_style}]",
     ]
@@ -202,21 +211,99 @@ def print_stock_report(
     def _signal(flag_val: bool) -> Text:
         return Text("✓", style="green") if flag_val else Text("✗", style="red")
 
+    sector = price_info.get("sector") if price_info else None
+    is_fin = _is_financial(sector)
+
     prof_table.add_row("EBITDA Margin", _fmt(basic.ebitda_margin_latest_pct, "%"), basic.ebitda_margin_trend or "-")
     ocf_ratio = basic.si_ocf_pat_ratio or basic.ocf_pat_ratio
-    if ocf_ratio is not None:
+    if ocf_ratio is not None and not is_fin:
         src = "[dim](annual)[/dim]" if basic.si_ocf_pat_ratio is not None else "[dim](qtrly)[/dim]"
         ocf_trend = basic.si_ocf_trend or basic.ocf_trend
         _trend_arrow = {"improving": "↑", "deteriorating": "↓", "stable": "→"}.get(ocf_trend or "", "")
-        _trend_style = {"improving": "green", "deteriorating": "red", "stable": "yellow"}.get(ocf_trend or "", "dim")
         _pass = ocf_ratio >= 0.75
+        _negative = ocf_ratio < 0
+        # Quality label
+        if _pass:
+            _quality = "positive OCF"
+            _quality_style = "green"
+        elif _negative:
+            _quality = "negative OCF"
+            _quality_style = "red"
+        else:
+            _quality = "low OCF"
+            _quality_style = "yellow"
+        # Trend label and style
+        if ocf_trend:
+            _trend_label = ocf_trend
+            if _negative and ocf_trend == "stable":
+                _trend_style = "red"       # chronic negative = bad
+            elif ocf_trend == "improving":
+                _trend_style = "green"
+            elif ocf_trend == "deteriorating":
+                _trend_style = "red"
+            else:
+                _trend_style = "yellow"
+        else:
+            _trend_label, _trend_style = "", "dim"
         ocf_signal = Text()
         ocf_signal.append("✓ " if _pass else "✗ ", style="green" if _pass else "red")
-        ocf_signal.append(f"{ocf_trend} {_trend_arrow}" if ocf_trend else "-", style=_trend_style)
-        prof_table.add_row(f"OCF/PAT Ratio  {src}", _fmt(ocf_ratio, "x"), ocf_signal)
+        ocf_signal.append(_quality, style=_quality_style)
+        if _trend_label:
+            ocf_signal.append("  (trend: ", style="dim")
+            ocf_signal.append(f"{_trend_label} {_trend_arrow}", style=_trend_style)
+            ocf_signal.append(")", style="dim")
+        ratio_label = f"OCF/PAT Ratio  {src}"
+        if basic.si_ocf_pat_ratio is not None and basic.si_ocf_annual is not None and basic.si_pat_annual is not None:
+            ratio_label += f"  [dim](OCF {basic.si_ocf_annual:+.0f} / PAT {basic.si_pat_annual:.0f} Cr)[/dim]"
+        prof_table.add_row(ratio_label, _fmt(ocf_ratio, "x"), ocf_signal)
     prof_table.add_row("ROE", _fmt(advanced.roe_pct, "%"), "✓" if (advanced.roe_pct or 0) >= 15 else "✗")
     prof_table.add_row("ROCE", _fmt(advanced.roce_pct, "%"), "✓" if (advanced.roce_pct or 0) >= 12 else "✗")
     console.print(prof_table)
+
+    # ---- Section 2a: Asset Quality (financial sector only) ----
+    if is_fin and (basic.gross_npa_pct is not None or basic.net_npa_pct is not None):
+        npa_pts = basic.score_breakdown.get("profitability", 0)
+        npa_table = Table(title=f"Asset Quality{_pts(npa_pts)}", box=box.SIMPLE_HEAVY)
+        npa_table.add_column("Metric", style="dim", min_width=14)
+        npa_table.add_column("Latest", justify="right")
+        npa_table.add_column("1Y Change", justify="right")
+        npa_table.add_column("2Y Change", justify="right")
+        npa_table.add_column("3Y Change", justify="right")
+        npa_table.add_column("Signal", justify="center")
+
+        def _npa_chg_fmt(chg: Optional[float]) -> Text:
+            if chg is None:
+                return Text("-", style="dim")
+            sign = "+" if chg > 0 else ""
+            style = "red" if chg > 0 else "green" if chg < 0 else "dim"
+            return Text(f"{sign}{chg:.2f}pp", style=style)
+
+        def _npa_signal(val, green_thresh, red_thresh) -> Text:
+            if val is None:
+                return Text("-", style="dim")
+            if val <= green_thresh:
+                return Text("✓ healthy", style="green")
+            elif val <= red_thresh:
+                return Text("✗ elevated", style="yellow")
+            return Text("✗ high", style="red")
+
+        npa_table.add_row(
+            "Gross NPA %",
+            _fmt(basic.gross_npa_pct, "%"),
+            _npa_chg_fmt(basic.gross_npa_1y_chg),
+            _npa_chg_fmt(basic.gross_npa_2y_chg),
+            _npa_chg_fmt(basic.gross_npa_3y_chg),
+            _npa_signal(basic.gross_npa_pct, 3.0, 7.0),
+        )
+        npa_table.add_row(
+            "Net NPA %",
+            _fmt(basic.net_npa_pct, "%"),
+            _npa_chg_fmt(basic.net_npa_1y_chg),
+            _npa_chg_fmt(basic.net_npa_2y_chg),
+            _npa_chg_fmt(basic.net_npa_3y_chg),
+            _npa_signal(basic.net_npa_pct, 1.0, 3.0),
+        )
+        console.print(npa_table)
 
     # ---- Section 2b: Annual Cash Flow (screener.in) ----
     has_si_cf = any(v is not None for v in [
@@ -285,6 +372,145 @@ def print_stock_report(
     debt_table.add_row("Net Debt/EBITDA", _fmt(advanced.net_debt_to_ebitda, "x"), "≤ 3.0")
     debt_table.add_row("FCF (Latest Qtr)", _fmt_inr(advanced.fcf_latest), "Positive")
     console.print(debt_table)
+
+    # helpers shared by next two tables
+    def _chg(val: Optional[float], good_direction: str = "up") -> Text:
+        if val is None:
+            return Text("-", style="dim")
+        up_good = good_direction == "up"
+        style = "green" if ((val >= 0) == up_good) else "red"
+        sign = "+" if val >= 0 else ""
+        return Text(f"{sign}{val:.1f}%", style=style)
+
+    def _cr(val: Optional[float]) -> str:
+        if val is None:
+            return "[dim]-[/dim]"
+        if abs(val) >= 10_000:
+            return f"₹{val:,.0f} Cr"
+        elif abs(val) >= 100:
+            return f"₹{val:,.1f} Cr"
+        return f"₹{val:.2f} Cr"
+
+    # ---- Section 3b: Net Cash Flow vs Cash Equivalents ----
+    has_cf_vs_cash = any(v is not None for v in [advanced.si_cash_equivalents, basic.si_net_cf_annual])
+    if has_cf_vs_cash:
+        cf_cash_table = Table(
+            title="Net Cash Flow vs Cash Equivalents  [dim](annual, ₹ Cr)[/dim]",
+            box=box.SIMPLE_HEAVY,
+        )
+        cf_cash_table.add_column("Metric", style="dim", min_width=22)
+        cf_cash_table.add_column("Latest", justify="right")
+        cf_cash_table.add_column("1Y Δ", justify="right")
+        cf_cash_table.add_column("3Y Δ", justify="right")
+        cf_cash_table.add_column("5Y Δ", justify="right")
+
+        if advanced.si_cash_equivalents is not None:
+            cash_cr = advanced.si_cash_equivalents  # already in Cr (from screener.in)
+            cf_cash_table.add_row(
+                "Cash Equivalents  [dim](in bank)[/dim]",
+                Text(_cr(cash_cr), style="green" if cash_cr > 0 else "red"),
+                _chg(advanced.si_cash_eq_1y_pct, "up"),
+                _chg(advanced.si_cash_eq_3y_pct, "up"),
+                _chg(advanced.si_cash_eq_5y_pct, "up"),
+            )
+
+        if basic.si_net_cf_annual is not None:
+            ncf = basic.si_net_cf_annual
+            ncf_style = "green" if ncf >= 0 else "red"
+            cf_cash_table.add_row(
+                "Net Cash Flow  [dim](annual)[/dim]",
+                Text(f"{_cr(ncf)}", style=ncf_style),
+                _chg(basic.si_net_cf_1y_pct, "up"),
+                _chg(basic.si_net_cf_3y_pct, "up"),
+                _chg(basic.si_net_cf_5y_pct, "up"),
+            )
+
+        # Burn runway: cash equivalents (Cr) vs net cash flow (Cr, from screener.in)
+        cash_cr_for_runway = advanced.si_cash_equivalents or 0  # already in Cr
+        if cash_cr_for_runway > 0 and (basic.si_net_cf_annual or 0) < 0:
+            burn = abs(basic.si_net_cf_annual)
+            months = round((cash_cr_for_runway / burn) * 12, 1)
+            runway_style = "green" if months >= 12 else "yellow" if months >= 6 else "red"
+            cf_cash_table.add_row(
+                "Cash Runway",
+                Text(f"{months:.1f} months at current burn", style=runway_style),
+                "-", "-", "-",
+            )
+
+        console.print(cf_cash_table)
+
+    # ---- Section 3c: Debt Quality ----
+    has_dq = any(v is not None for v in [advanced.si_long_term_borrowings, advanced.si_short_term_borrowings, advanced.si_total_borrowings])
+    if has_dq:
+        dq_table = Table(
+            title="Debt Quality  [dim](annual, ₹ Cr)[/dim]",
+            box=box.SIMPLE_HEAVY,
+        )
+        dq_table.add_column("Metric", style="dim", min_width=22)
+        dq_table.add_column("Amount", justify="right")
+        dq_table.add_column("% of Total", justify="right")
+        dq_table.add_column("Signal", justify="left")
+
+        # Values are already in Cr (from screener.in)
+        total = advanced.si_total_borrowings if advanced.si_total_borrowings else None
+        lt    = advanced.si_long_term_borrowings if advanced.si_long_term_borrowings else None
+        st    = advanced.si_short_term_borrowings if advanced.si_short_term_borrowings else None
+
+        def _pct_of_total(val: Optional[float]) -> str:
+            if val is None or not total or total == 0:
+                return "[dim]-[/dim]"
+            return f"{val / total * 100:.1f}%"
+
+        if total is not None:
+            dq_table.add_row(
+                "Total Borrowings",
+                _cr(total),
+                "-",
+                _chg(advanced.si_borrowings_1y_pct, "down"),
+            )
+
+        if lt is not None:
+            dq_table.add_row(
+                "Long-term  [dim](> 1 year)[/dim]",
+                Text(_cr(lt), style="green"),
+                _pct_of_total(lt),
+                Text("✓ stable, predictable repayment", style="dim green"),
+            )
+
+        if st is not None:
+            st_pct = (st / total * 100) if total and total > 0 else None
+            if st_pct is not None and st_pct > 75:
+                st_signal = Text("✗ very high — needs frequent renewal (risk)", style="bold red")
+            elif st_pct is not None and st_pct > 50:
+                st_signal = Text("⚠ ST > LT — refinancing pressure", style="yellow")
+            else:
+                st_signal = Text("✓ manageable", style="dim green")
+            dq_table.add_row(
+                "Short-term  [dim](< 1 year)[/dim]",
+                Text(_cr(st), style="red" if (st_pct or 0) > 50 else "yellow"),
+                _pct_of_total(st),
+                st_signal,
+            )
+
+        # ST vs LT comparison note
+        if lt is not None and st is not None and lt > 0:
+            ratio = st / lt
+            if ratio > 1:
+                dq_table.add_row(
+                    "ST / LT Ratio",
+                    Text(f"{ratio:.1f}x", style="red"),
+                    "-",
+                    Text(f"Short-term debt is {ratio:.1f}x the long-term — banks can recall at any time", style="red"),
+                )
+            else:
+                dq_table.add_row(
+                    "ST / LT Ratio",
+                    Text(f"{ratio:.1f}x", style="green"),
+                    "-",
+                    Text("Long-term dominant — lower refinancing risk", style="dim green"),
+                )
+
+        console.print(dq_table)
 
     # ---- Section 4: Shareholding ----
     hold_table = Table(title=f"Shareholding Pattern{_pts(abd.get('shareholding', 0))}", box=box.SIMPLE_HEAVY)

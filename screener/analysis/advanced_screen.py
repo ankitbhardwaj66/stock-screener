@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import math
+
 import pandas as pd
 import yaml
 
@@ -57,6 +59,18 @@ class AdvancedScreenResult:
     fcf_latest: Optional[float] = None
     fcf_trend: Optional[str] = None
     revenue_quality_score: Optional[float] = None  # 0-10
+    # Cash Equivalents trend — screener.in balance sheet (₹ Cr)
+    si_cash_equivalents: Optional[float] = None
+    si_cash_eq_1y_pct: Optional[float] = None
+    si_cash_eq_3y_pct: Optional[float] = None
+    si_cash_eq_5y_pct: Optional[float] = None
+    # Debt quality — screener.in balance sheet (₹ Cr)
+    si_long_term_borrowings: Optional[float] = None
+    si_short_term_borrowings: Optional[float] = None
+    si_total_borrowings: Optional[float] = None
+    si_borrowings_1y_pct: Optional[float] = None
+    si_borrowings_3y_pct: Optional[float] = None
+    si_borrowings_5y_pct: Optional[float] = None
     # Historical PE — 1Y
     pe_mean_historical: Optional[float] = None
     pe_median_historical: Optional[float] = None
@@ -82,25 +96,21 @@ class AdvancedScreenResult:
     score_breakdown: dict = field(default_factory=dict)  # section → points
 
 
-def _find_col(df: pd.DataFrame, keywords: list[str]) -> Optional[str]:
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if any(kw.lower() in col_lower for kw in keywords):
-            return col
-    return None
-
-
-def _col_as_series(df: pd.DataFrame, col: str) -> pd.Series:
-    """Return a numeric Series for col, safely handling duplicate column names."""
-    result = df[col]
-    if isinstance(result, pd.DataFrame):
-        result = result.iloc[:, 0]
-    return result.apply(pd.to_numeric, errors="coerce")
-
-
 def _last_val(series: pd.Series) -> Optional[float]:
     s = series.apply(pd.to_numeric, errors="coerce").dropna()
     return float(s.iloc[-1]) if not s.empty else None
+
+
+def _pct_change_periods(series: pd.Series, periods: int) -> Optional[float]:
+    """% change between last value and `periods` quarters ago."""
+    s = series.apply(pd.to_numeric, errors="coerce").dropna()
+    if len(s) < periods + 1:
+        return None
+    prev = s.iloc[-(periods + 1)]
+    curr = s.iloc[-1]
+    if prev == 0 or pd.isna(prev) or pd.isna(curr):
+        return None
+    return round(((curr - prev) / abs(prev)) * 100, 2)
 
 
 def _trend(series: pd.Series, window: int = 4) -> str:
@@ -120,17 +130,6 @@ def _trend(series: pd.Series, window: int = 4) -> str:
         return "unknown"
 
 
-def _consecutive_decline(series: pd.Series, n: int = 3) -> bool:
-    """Returns True if last n values are consecutively declining."""
-    try:
-        s = series.apply(pd.to_numeric, errors="coerce").dropna().tail(n + 1)
-        if len(s) < n + 1:
-            return False
-        diffs = s.diff().dropna().tail(n)
-        return (diffs < 0).all()
-    except Exception:
-        return False
-
 
 class AdvancedScreener:
     """Analyses debt, promoter/FII activity, valuations, working capital."""
@@ -142,34 +141,35 @@ class AdvancedScreener:
         self,
         symbol: str,
         price_info: Optional[dict],
-        balance_df: Optional[pd.DataFrame],
-        income_df: Optional[pd.DataFrame],
-        cashflow_df: Optional[pd.DataFrame],
         shareholding: Optional[dict],
         si_ratios: Optional[dict],
         historical_pe: Optional[dict] = None,
         si_wc_ratios: Optional[dict] = None,
+        si_balance_df: Optional[pd.DataFrame] = None,
+        si_annual_df: Optional[pd.DataFrame] = None,
         sector: Optional[str] = None,
         eps_yoy_pct: Optional[float] = None,
+        pat_yoy_pct: Optional[float] = None,
     ) -> AdvancedScreenResult:
         result = AdvancedScreenResult(symbol=symbol)
         financial = _is_financial(sector)
-        # Use relaxed D/E thresholds for financial sector (leverage is core to their model)
-        cfg_d = self.cfg["financial_sector"] if financial else self.cfg["debt"]
+        # financial_sector overrides only the keys it defines; missing keys fall back to debt config
+        cfg_d = {**self.cfg["debt"], **(self.cfg["financial_sector"] if financial else {})}
         cfg_v = self.cfg["valuation"]
         cfg_s = self.cfg["shareholding"]
 
         self._fill_ratios(result, price_info, si_ratios)
-        # PEG = P/E / EPS growth rate — computed after pe_ratio is filled
-        if result.pe_ratio and result.pe_ratio > 0 and eps_yoy_pct and eps_yoy_pct > 0:
-            result.peg_ratio = round(result.pe_ratio / eps_yoy_pct, 2)
-        self._fill_debt(result, balance_df, income_df)
+        # PEG = P/E / growth rate — use max(EPS, PAT) to avoid dilution distortion
+        growth_for_peg = max(v for v in [eps_yoy_pct, pat_yoy_pct] if v is not None and v > 0) if any(v is not None and v > 0 for v in [eps_yoy_pct, pat_yoy_pct]) else None
+        if result.pe_ratio and result.pe_ratio > 0 and growth_for_peg:
+            result.peg_ratio = round(result.pe_ratio / growth_for_peg, 2)
+        self._fill_debt_from_si(result, si_ratios, si_balance_df, si_annual_df, financial)
+        self._fill_balance_sheet_si(result, si_balance_df)
         self._fill_shareholding(result, shareholding)
-        self._fill_working_capital(result, balance_df, income_df)
-        self._fill_working_capital_from_si(result, si_wc_ratios)  # overrides with accurate data
-        self._fill_fcf(result, cashflow_df)
+        self._fill_working_capital_from_si(result, si_wc_ratios)
+        self._fill_fcf_from_si(result, si_balance_df)
         self._fill_historical_pe(result, historical_pe)
-        self._apply_flags(result, cfg_d, cfg_v, cfg_s, income_df, cashflow_df)
+        self._apply_flags(result, cfg_d, cfg_v, cfg_s)
         result.red_flag_count = sum(1 for f in result.flags if f.level == FlagLevel.RED)
         result.score = self._compute_score(result, cfg_d, cfg_v, cfg_s)
         return result
@@ -177,11 +177,15 @@ class AdvancedScreener:
     def _fill_ratios(self, result: AdvancedScreenResult, price_info: Optional[dict], si_ratios: Optional[dict]) -> None:
         """Fill ratios from screener.in first, fall back to yfinance."""
         if si_ratios:
-            result.roe_pct = si_ratios.get("roe")
-            result.roce_pct = si_ratios.get("roce")
-            result.pe_ratio = si_ratios.get("pe")
-            result.pb_ratio = si_ratios.get("pb")
-            result.de_ratio = si_ratios.get("de_ratio")
+            roe = si_ratios.get("roe")
+            roce = si_ratios.get("roce")
+            result.roe_pct = None if (roe is None or (isinstance(roe, float) and math.isnan(roe))) else roe
+            result.roce_pct = None if (roce is None or (isinstance(roce, float) and math.isnan(roce))) else roce
+            def _clean(v):
+                return None if (v is None or (isinstance(v, float) and math.isnan(v))) else v
+            result.pe_ratio = _clean(si_ratios.get("pe"))
+            result.pb_ratio = _clean(si_ratios.get("pb"))
+            result.de_ratio = _clean(si_ratios.get("de_ratio"))
 
         # Fill gaps from price_info (yfinance)
         if price_info:
@@ -190,47 +194,42 @@ class AdvancedScreener:
             if result.pb_ratio is None:
                 result.pb_ratio = price_info.get("pb_ratio")
 
-    def _fill_debt(
+    def _fill_debt_from_si(
         self,
         result: AdvancedScreenResult,
-        balance_df: Optional[pd.DataFrame],
-        income_df: Optional[pd.DataFrame],
+        si_ratios: Optional[dict],
+        si_balance_df: Optional[pd.DataFrame],
+        si_annual_df: Optional[pd.DataFrame],
+        financial: bool,
     ) -> None:
-        if balance_df is None or balance_df.empty:
+        """Compute debt metrics entirely from screener.in data."""
+        from screener.analysis.basic_screen import _si_clean, _si_row_series
+
+        # D/E already filled from si_ratios in _fill_ratios — nothing extra needed
+
+        if si_annual_df is None or si_annual_df.empty:
             return
 
-        debt_col = _find_col(balance_df, ["Total_Debt", "Total Debt", "Borrowings"])
-        equity_col = _find_col(balance_df, ["Equity", "Stockholders Equity", "Net Worth"])
-        cash_col = _find_col(balance_df, ["Cash"])
+        # Operating Profit = EBITDA proxy (screener.in annual P&L)
+        op_s = _si_row_series(si_annual_df, ["Operating Profit", "EBITDA"])
+        interest_s = _si_row_series(si_annual_df, ["Interest"])
 
-        total_debt = _last_val(_col_as_series(balance_df, debt_col)) if debt_col else None
-        equity = _last_val(_col_as_series(balance_df, equity_col)) if equity_col else None
-        cash = _last_val(_col_as_series(balance_df, cash_col)) if cash_col else None
+        annual_ebitda = None
+        if op_s is not None and not op_s.dropna().empty:
+            annual_ebitda = float(op_s.dropna().iloc[-1])  # Cr
 
-        if total_debt is not None and equity is not None and equity != 0:
-            if result.de_ratio is None:
-                result.de_ratio = round(total_debt / equity, 2)
+        # Interest Coverage = Operating Profit / Interest
+        if interest_s is not None and not interest_s.dropna().empty:
+            last_interest = float(interest_s.dropna().iloc[-1])
+            if last_interest and last_interest > 0 and annual_ebitda is not None and annual_ebitda > 0:
+                result.interest_coverage = round(annual_ebitda / last_interest, 2)
 
-        # Net debt to EBITDA
-        if income_df is not None and not income_df.empty:
-            ebitda_col = _find_col(income_df, ["EBITDA"])
-            interest_col = _find_col(income_df, ["Interest_Expense", "Interest Expense"])
-
-            if ebitda_col:
-                ebitda = _col_as_series(income_df, ebitda_col)
-                # Annualize (sum last 4 quarters)
-                annual_ebitda = ebitda.dropna().tail(4).sum()
-                if total_debt is not None and cash is not None and annual_ebitda != 0:
-                    net_debt = total_debt - cash
-                    result.net_debt_to_ebitda = round(net_debt / annual_ebitda, 2)
-
-            if interest_col and ebitda_col:
-                interest = _col_as_series(income_df, interest_col)
-                ebitda_series = _col_as_series(income_df, ebitda_col)
-                last_interest = _last_val(interest)
-                last_ebitda = _last_val(ebitda_series)
-                if last_interest and last_ebitda and last_interest != 0:
-                    result.interest_coverage = round(abs(last_ebitda / last_interest), 2)
+        # Net Debt / EBITDA — use Borrowings from balance sheet
+        if si_balance_df is not None and not si_balance_df.empty and annual_ebitda:
+            bor_s = _si_row_series(si_balance_df, ["Borrowings"])
+            if bor_s is not None and not bor_s.dropna().empty:
+                borrowings_cr = float(bor_s.dropna().iloc[-1])
+                result.net_debt_to_ebitda = round(borrowings_cr / annual_ebitda, 2)
 
     def _fill_shareholding(self, result: AdvancedScreenResult, shareholding: Optional[dict]) -> None:
         if not shareholding:
@@ -251,69 +250,6 @@ class AdvancedScreener:
         result.public_holding_delta = shareholding.get("public_delta")
         result.public_holding_6q_delta = shareholding.get("public_6q_delta")
 
-    def _fill_working_capital(
-        self,
-        result: AdvancedScreenResult,
-        balance_df: Optional[pd.DataFrame],
-        income_df: Optional[pd.DataFrame],
-    ) -> None:
-        if balance_df is None or income_df is None:
-            return
-
-        # Balance sheet columns
-        # Prefer "Net Receivables" / "Accounts Receivable" over "Other Receivables"
-        receivables_col = (
-            _find_col(balance_df, ["Net Receivable", "Trade Receivable"])
-            or _find_col(balance_df, ["Accounts Receivable"])
-            or _find_col(balance_df, ["Receivable"])
-        )
-        inventory_col = _find_col(balance_df, ["Inventory"])
-        payables_col = _find_col(balance_df, ["Accounts Payable", "Payable"])
-
-        # Income statement columns
-        rev_col = _find_col(income_df, ["Revenue", "Sales", "Total Revenue"])
-        # COGS for inventory/payable days (more accurate than revenue)
-        cogs_col = _find_col(income_df, ["Cost Of Revenue", "Cost of Goods", "COGS", "Cost_Of_Revenue"])
-
-        if not rev_col:
-            return
-
-        revenue = _col_as_series(income_df, rev_col).dropna()
-        annual_rev = revenue.tail(4).sum() if len(revenue) >= 4 else revenue.sum()
-        if annual_rev <= 0:
-            return
-
-        # Annualised COGS (fall back to revenue if unavailable)
-        annual_cogs = annual_rev
-        if cogs_col:
-            cogs = _col_as_series(income_df, cogs_col).dropna()
-            c = cogs.tail(4).sum() if len(cogs) >= 4 else cogs.sum()
-            if c > 0:
-                annual_cogs = c
-
-        # Debtor Days = (Trade Receivables / Revenue) × 365
-        if receivables_col:
-            receivables = _last_val(_col_as_series(balance_df, receivables_col))
-            if receivables is not None and receivables > 0:
-                result.debtor_days = round((receivables / annual_rev) * 365, 1)
-
-        # Inventory Days = (Inventory / COGS) × 365
-        if inventory_col:
-            inventory = _last_val(_col_as_series(balance_df, inventory_col))
-            if inventory is not None and inventory > 0:
-                result.inventory_days = round((inventory / annual_cogs) * 365, 1)
-
-        # Days Payable = (Accounts Payable / COGS) × 365
-        if payables_col:
-            payables = _last_val(_col_as_series(balance_df, payables_col))
-            if payables is not None and payables > 0:
-                result.days_payable = round((payables / annual_cogs) * 365, 1)
-
-        # CCC = Debtor Days + Inventory Days − Days Payable
-        if result.debtor_days is not None and result.inventory_days is not None:
-            dp = result.days_payable or 0
-            result.cash_conversion_cycle = round(result.debtor_days + result.inventory_days - dp, 1)
-
     def _fill_working_capital_from_si(
         self, result: AdvancedScreenResult, si_wc: Optional[dict]
     ) -> None:
@@ -329,14 +265,82 @@ class AdvancedScreener:
         if si_wc.get("ccc") is not None:
             result.cash_conversion_cycle = si_wc["ccc"]
 
-    def _fill_fcf(self, result: AdvancedScreenResult, cashflow_df: Optional[pd.DataFrame]) -> None:
-        if cashflow_df is None or cashflow_df.empty:
+    def _fill_balance_sheet_si(
+        self, result: AdvancedScreenResult, si_balance_df: Optional[pd.DataFrame]
+    ) -> None:
+        """Parse Cash Equivalents and Borrowings (LT/ST) from screener.in balance sheet (₹ Cr)."""
+        if si_balance_df is None or si_balance_df.empty:
             return
-        fcf_col = _find_col(cashflow_df, ["FCF", "Free Cash Flow"])
-        if fcf_col:
-            fcf = _col_as_series(cashflow_df, fcf_col)
-            result.fcf_latest = _last_val(fcf)
-            result.fcf_trend = _trend(fcf, window=6)
+
+        from screener.analysis.basic_screen import _si_clean
+
+        cols = list(si_balance_df.columns)
+        end = len(cols) - 1 if str(cols[-1]).strip().upper() == "TTM" else len(cols)
+
+        def _row_series(keywords: list[str], exact: bool = False) -> Optional[pd.Series]:
+            for _, row in si_balance_df.iterrows():
+                label = str(row.iloc[0]).lower().strip()
+                match = (label in [k.lower() for k in keywords]) if exact else any(kw.lower() in label for kw in keywords)
+                if match:
+                    vals = [_si_clean(row.iloc[i]) for i in range(1, end)]
+                    return pd.Series(vals, dtype=float)
+            return None
+
+        def _annual_pct(s: pd.Series, periods: int) -> Optional[float]:
+            clean = s.dropna()
+            if len(clean) < periods + 1:
+                return None
+            prev, curr = clean.iloc[-(periods + 1)], clean.iloc[-1]
+            if prev == 0 or pd.isna(prev) or pd.isna(curr):
+                return None
+            return round(((curr - prev) / abs(prev)) * 100, 2)
+
+        def _latest(s: Optional[pd.Series]) -> Optional[float]:
+            if s is None:
+                return None
+            c = s.dropna()
+            return float(c.iloc[-1]) if not c.empty else None
+
+        # Cash Equivalents (sub-row under Other Assets on screener.in)
+        cash_s = _row_series(["Cash Equivalents", "Cash and Cash Equivalents", "Cash & Cash Equivalents", "Cash equivalents"])
+        if cash_s is not None and not cash_s.dropna().empty:
+            result.si_cash_equivalents = _latest(cash_s)
+            result.si_cash_eq_1y_pct = _annual_pct(cash_s, 1)
+            result.si_cash_eq_3y_pct = _annual_pct(cash_s, 3)
+            result.si_cash_eq_5y_pct = _annual_pct(cash_s, 5)
+
+        # Total Borrowings (parent row — label is "Borrowings+" in screener.in)
+        total_bor_s = _row_series(["Borrowings+"], exact=True)
+        if total_bor_s is None:
+            total_bor_s = _row_series(["Total Borrowings", "Total Debt"])
+        # Long-term and Short-term sub-rows
+        lt_s = _row_series(["Long term Borrowings", "Long Term Borrowing", "Long-term Borrowing"])
+        st_s = _row_series(["Short term Borrowings", "Short Term Borrowing", "Short-term Borrowing"])
+
+        if total_bor_s is not None and not total_bor_s.dropna().empty:
+            result.si_total_borrowings = _latest(total_bor_s)
+            result.si_borrowings_1y_pct = _annual_pct(total_bor_s, 1)
+            result.si_borrowings_3y_pct = _annual_pct(total_bor_s, 3)
+            result.si_borrowings_5y_pct = _annual_pct(total_bor_s, 5)
+
+        result.si_long_term_borrowings = _latest(lt_s)
+        result.si_short_term_borrowings = _latest(st_s)
+
+        # Compute D/E ratio from balance sheet if not already set from si_ratios
+        if result.de_ratio is None and result.si_total_borrowings is not None:
+            eq_cap_s = _row_series(["Equity Capital", "Share Capital"])
+            reserves_s = _row_series(["Reserves"])
+            eq_cap = _latest(eq_cap_s) or 0.0
+            reserves = _latest(reserves_s) or 0.0
+            equity = eq_cap + reserves
+            if equity > 0:
+                result.de_ratio = round(result.si_total_borrowings / equity, 2)
+
+    def _fill_fcf_from_si(self, result: AdvancedScreenResult, si_balance_df: Optional[pd.DataFrame]) -> None:
+        """FCF latest value is passed via BasicScreenResult.si_fcf_annual — set at call site in screen()."""
+        # FCF is already available on BasicScreenResult.si_fcf_annual (OCF + ICF from screener.in).
+        # Nothing to compute here — fcf_latest/fcf_trend are populated by the caller if needed.
+        pass
 
     def _fill_historical_pe(self, result: AdvancedScreenResult, historical_pe: Optional[dict]) -> None:
         if not historical_pe:
@@ -363,8 +367,6 @@ class AdvancedScreener:
         cfg_d: dict,
         cfg_v: dict,
         cfg_s: dict,
-        income_df: Optional[pd.DataFrame],
-        cashflow_df: Optional[pd.DataFrame],
     ) -> None:
         # --- Debt flags ---
         if result.de_ratio is not None:
@@ -424,13 +426,34 @@ class AdvancedScreener:
                 result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Institutional", f"FII selling: {result.fii_holding_delta:.1f}% QoQ"))
 
         # --- Valuation flags ---
-        if result.pe_ratio is not None:
-            if result.pe_ratio > cfg_v["pe_red"]:
-                result.flags.append(ScreenFlag(FlagLevel.RED, "Valuation", f"Extremely high P/E: {result.pe_ratio:.1f}x (alert > {cfg_v['pe_red']}x)"))
-            elif result.pe_ratio > cfg_v["pe_max"]:
-                result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Valuation", f"High P/E: {result.pe_ratio:.1f}x (max {cfg_v['pe_max']}x)"))
-            elif result.pe_ratio > 0:
-                result.flags.append(ScreenFlag(FlagLevel.GREEN, "Valuation", f"Reasonable P/E: {result.pe_ratio:.1f}x"))
+        # P/E vs 5Y historical mean — flag matches scoring buckets
+        pe_mean_ref = result.pe_mean_5y or result.pe_mean_historical
+        if result.pe_ratio and result.pe_ratio > 0 and pe_mean_ref and pe_mean_ref > 0:
+            ratio = result.pe_ratio / pe_mean_ref
+            pct_above = (ratio - 1) * 100
+            if ratio < 0.70:
+                result.flags.append(ScreenFlag(FlagLevel.GREEN, "Valuation",
+                    f"P/E {result.pe_ratio:.1f}x is {abs(pct_above):.0f}% below 5Y mean {pe_mean_ref:.1f}x — historically cheap"))
+            elif ratio < 0.90:
+                result.flags.append(ScreenFlag(FlagLevel.GREEN, "Valuation",
+                    f"P/E {result.pe_ratio:.1f}x is below 5Y mean {pe_mean_ref:.1f}x"))
+            elif ratio <= 1.15:
+                result.flags.append(ScreenFlag(FlagLevel.GREEN, "Valuation",
+                    f"P/E {result.pe_ratio:.1f}x near 5Y mean {pe_mean_ref:.1f}x"))
+            elif ratio <= 1.40:
+                result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Valuation",
+                    f"P/E {result.pe_ratio:.1f}x is {pct_above:.0f}% above 5Y mean {pe_mean_ref:.1f}x — expensive vs history"))
+            else:
+                result.flags.append(ScreenFlag(FlagLevel.RED, "Valuation",
+                    f"P/E {result.pe_ratio:.1f}x is {pct_above:.0f}% above 5Y mean {pe_mean_ref:.1f}x — very expensive vs history"))
+        elif result.pe_ratio and result.pe_ratio > 0:
+            # No historical mean available — just show absolute P/E level
+            if result.pe_ratio < cfg_v["pe_max"]:
+                result.flags.append(ScreenFlag(FlagLevel.GREEN, "Valuation", f"P/E {result.pe_ratio:.1f}x — below {cfg_v['pe_max']}x threshold"))
+            elif result.pe_ratio < cfg_v["pe_red"]:
+                result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Valuation", f"P/E {result.pe_ratio:.1f}x — elevated (max {cfg_v['pe_max']}x)"))
+            else:
+                result.flags.append(ScreenFlag(FlagLevel.RED, "Valuation", f"P/E {result.pe_ratio:.1f}x — very expensive (red > {cfg_v['pe_red']}x)"))
 
         if result.pb_ratio is not None and result.pb_ratio > cfg_v["pb_max"]:
             result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Valuation", f"High P/B: {result.pb_ratio:.1f}x (max {cfg_v['pb_max']}x)"))
@@ -449,20 +472,6 @@ class AdvancedScreener:
             else:
                 result.flags.append(ScreenFlag(FlagLevel.RED, "Valuation", f"PEG {result.peg_ratio:.2f} — very expensive vs growth"))
 
-        # --- P/E vs historical mean ---
-        if result.pe_ratio and result.pe_ratio > 0 and result.pe_mean_historical:
-            ratio = result.pe_ratio / result.pe_mean_historical
-            label = "1yr"
-            if ratio > 1.5:
-                result.flags.append(ScreenFlag(
-                    FlagLevel.YELLOW, "Valuation",
-                    f"P/E {result.pe_ratio:.1f}x is {ratio:.1f}x above {label} mean {result.pe_mean_historical:.1f}x — expensive vs history",
-                ))
-            elif ratio < 0.75:
-                result.flags.append(ScreenFlag(
-                    FlagLevel.GREEN, "Valuation",
-                    f"P/E {result.pe_ratio:.1f}x is below {label} mean {result.pe_mean_historical:.1f}x — cheap vs history",
-                ))
 
         # --- FCF flags ---
         if result.fcf_latest is not None and result.fcf_latest < 0:
@@ -471,18 +480,6 @@ class AdvancedScreener:
             result.flags.append(ScreenFlag(FlagLevel.YELLOW, "CashFlow", "FCF trend deteriorating"))
         elif result.fcf_trend == "improving":
             result.flags.append(ScreenFlag(FlagLevel.GREEN, "CashFlow", "FCF trend improving"))
-
-        # --- OCF declining 3+ quarters while PAT rising (checked from income+cashflow) ---
-        if income_df is not None and cashflow_df is not None:
-            ocf_col = _find_col(cashflow_df, ["OCF", "Operating Cash Flow"])
-            pat_col = _find_col(income_df, ["Net_Income", "Net Income"])
-            if ocf_col and pat_col:
-                ocf = _col_as_series(cashflow_df, ocf_col)
-                pat = _col_as_series(income_df, pat_col)
-                if _consecutive_decline(ocf, 3):
-                    last_pat_change = pat.diff().dropna().tail(3)
-                    if (last_pat_change > 0).sum() >= 2:
-                        result.flags.append(ScreenFlag(FlagLevel.RED, "CashQuality", "OCF declining 3+ quarters while PAT rising — earnings quality RED FLAG"))
 
         # --- Working capital deterioration ---
         cfg_wc = self.cfg["working_capital"]
@@ -577,14 +574,6 @@ class AdvancedScreener:
             score += pts
             bd["shareholding"] += pts
 
-        # P/E ratio (max ±10)
-        if result.pe_ratio is not None and result.pe_ratio > 0:
-            pts = 10 if result.pe_ratio < 15 else \
-                   5 if result.pe_ratio < cfg_v["pe_max"] else \
-                  -5 if result.pe_ratio < cfg_v["pe_red"] else -10
-            score += pts
-            bd["valuation"] += pts
-
         # PEG ratio (max ±6)
         if result.peg_ratio is not None and result.peg_ratio > 0:
             pts = 6 if result.peg_ratio < 0.75 else \
@@ -605,9 +594,11 @@ class AdvancedScreener:
             bd["valuation"] += pts
 
         # Red flag penalty
+        red_flags = [f for f in result.flags if f.level == FlagLevel.RED]
         penalty = result.red_flag_count * self.cfg["scoring"]["weights"]["red_flag_penalty"] * -1
         score -= penalty
         bd["penalties"] = -penalty
+        bd["penalty_flags"] = [f.message for f in red_flags]
 
         result.score_breakdown = bd
         return max(0, min(100, score))

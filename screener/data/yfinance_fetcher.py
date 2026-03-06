@@ -509,14 +509,10 @@ class YFinanceFetcher:
             return None
 
     def fetch_all(self, symbol: str) -> dict:
-        """Fetch all data for a symbol and return as bundled dict."""
+        """Fetch price-only data for a symbol. All financial statements come from screener.in."""
         return {
             "symbol": symbol,
             "price_info": self.get_price_info(symbol),
-            "quarterly_income": self.get_quarterly_income(symbol),
-            "quarterly_balance": self.get_quarterly_balance_sheet(symbol),
-            "quarterly_cashflow": self.get_quarterly_cashflow(symbol),
-            "major_holders": self.get_major_holders(symbol),
             "historical_pe": self.get_historical_pe_stats(symbol),
             "price_trend": self.get_price_trend(symbol),
         }

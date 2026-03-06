@@ -72,9 +72,22 @@ class BasicScreenResult:
     si_icf_annual: Optional[float] = None   # Cash from Investing Activity
     si_fcf_annual: Optional[float] = None   # FCF = OCF + ICF
     si_cff_annual: Optional[float] = None   # Cash from Financing Activity
+    si_pat_annual: Optional[float] = None      # Annual PAT (used in OCF/PAT ratio)
     si_net_cf_annual: Optional[float] = None  # Net Cash Flow
+    si_net_cf_1y_pct: Optional[float] = None  # Net Cash Flow 1Y % change
+    si_net_cf_3y_pct: Optional[float] = None  # Net Cash Flow 3Y % change
+    si_net_cf_5y_pct: Optional[float] = None  # Net Cash Flow 5Y % change
     si_ocf_trend: Optional[str] = None      # 5yr trend of annual OCF
     si_ocf_pat_ratio: Optional[float] = None  # annual OCF / annual PAT
+    # Asset quality — financial sector only
+    gross_npa_pct: Optional[float] = None
+    gross_npa_1y_chg: Optional[float] = None   # pp change vs 1 year ago
+    gross_npa_2y_chg: Optional[float] = None   # pp change vs 2 years ago
+    gross_npa_3y_chg: Optional[float] = None   # pp change vs 3 years ago
+    net_npa_pct: Optional[float] = None
+    net_npa_1y_chg: Optional[float] = None
+    net_npa_2y_chg: Optional[float] = None
+    net_npa_3y_chg: Optional[float] = None
     # Flags and score
     flags: list[ScreenFlag] = field(default_factory=list)
     score: int = 0
@@ -198,6 +211,17 @@ def _si_row_series(si_df: pd.DataFrame, keywords: list[str], skip_ttm: bool = Fa
     return None
 
 
+def _si_pct_change(series: pd.Series, periods: int) -> Optional[float]:
+    """% change between the latest value and `periods` years ago in a screener.in series."""
+    clean = series.dropna()
+    if len(clean) < periods + 1:
+        return None
+    prev, curr = clean.iloc[-(periods + 1)], clean.iloc[-1]
+    if prev == 0 or pd.isna(prev) or pd.isna(curr):
+        return None
+    return round(((curr - prev) / abs(prev)) * 100, 2)
+
+
 class BasicScreener:
     """Analyses quarterly income/cashflow for basic quality signals."""
 
@@ -207,115 +231,65 @@ class BasicScreener:
     def screen(
         self,
         symbol: str,
-        income_df: Optional[pd.DataFrame],
-        cashflow_df: Optional[pd.DataFrame],
         si_quarterly_df: Optional[pd.DataFrame] = None,
         si_annual_df: Optional[pd.DataFrame] = None,
         si_cashflow_df: Optional[pd.DataFrame] = None,
         sector: Optional[str] = None,
     ) -> BasicScreenResult:
-        """
-        si_quarterly_df (screener.in) is used as the PRIMARY source for Revenue/PAT/EPS/margin.
-        income_df (yfinance) is the FALLBACK when screener.in data is unavailable.
-        cashflow_df (yfinance) is used for OCF (screener.in cash flow is annual-only).
-        """
+        """All financial data from screener.in exclusively."""
         result = BasicScreenResult(symbol=symbol)
         cfg_g = self.cfg["growth"]
         cfg_p = self.cfg["profitability"]
 
         si_ok = si_quarterly_df is not None and not si_quarterly_df.empty
+        ann_ok = si_annual_df is not None and not si_annual_df.empty
 
-        if not si_ok and (income_df is None or income_df.empty):
-            result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Data", "No quarterly income data available"))
+        if not si_ok:
+            result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Data", "No screener.in quarterly data available"))
             result.score = 0
             return result
 
+        financial = _is_financial(sector)
+
         # ── Revenue ────────────────────────────────────────────────────────
-        if si_ok:
-            rev = _si_row_series(si_quarterly_df, ["Sales", "Revenue"])
-        else:
-            rev = None
-        if rev is None or rev.dropna().empty:
-            # fallback to yfinance
-            rev_col = _find_col(income_df, ["Revenue", "Sales", "Total Revenue"]) if income_df is not None else None
-            rev = _col_as_series(income_df, rev_col) if rev_col else None
-
-        _si_source = si_ok  # track whether values come from screener.in (Crores) or yfinance (abs INR)
-        ann_ok = si_annual_df is not None and not si_annual_df.empty
-
+        # Banks use "Interest Earned" / "Revenue from operations" instead of "Sales"
+        rev_keys = ["Sales", "Revenue from operations", "Revenue"]
+        if financial:
+            rev_keys = ["Interest Earned", "Interest Income", "Revenue from operations", "Total Income", "Sales", "Revenue"]
+        rev = _si_row_series(si_quarterly_df, rev_keys)
         if rev is not None and not rev.dropna().empty:
-            raw_latest = float(rev.dropna().iloc[-1])
-            result.revenue_latest = raw_latest * 1e7 if _si_source else raw_latest
+            result.revenue_latest = float(rev.dropna().iloc[-1]) * 1e7  # Cr → INR
             result.revenue_qoq_pct = _avg_qoq_pct(rev, 5)
-            # YoY: prefer annual data (last 5 fiscal years), fall back to quarterly
-            ann_rev = _si_row_series(si_annual_df, ["Sales", "Revenue"]) if ann_ok else None
+            ann_rev = _si_row_series(si_annual_df, rev_keys) if ann_ok else None
             result.revenue_yoy_pct = _avg_qoq_pct(ann_rev, 5) if (ann_rev is not None and not ann_rev.dropna().empty) else _avg_yoy_pct(rev, 5)
             result.revenue_yoy_3y_pct = _avg_qoq_pct(ann_rev, 3) if (ann_rev is not None and not ann_rev.dropna().empty) else _avg_yoy_pct(rev, 3)
 
         # ── PAT / Net Profit ───────────────────────────────────────────────
-        if si_ok:
-            pat = _si_row_series(si_quarterly_df, ["Net Profit", "PAT"])
-        else:
-            pat = None
-        if pat is None or pat.dropna().empty:
-            pat_col = _find_col(income_df, ["Net_Income", "Net Income", "PAT", "Profit after tax"]) if income_df is not None else None
-            pat = _col_as_series(income_df, pat_col) if pat_col else None
-            _si_source = False  # fell back to yfinance
-
+        pat_keys = ["Net Profit", "PAT", "Profit after tax"]
+        pat = _si_row_series(si_quarterly_df, pat_keys)
         if pat is not None and not pat.dropna().empty:
-            raw_latest = float(pat.dropna().iloc[-1])
-            result.pat_latest = raw_latest * 1e7 if _si_source else raw_latest
+            result.pat_latest = float(pat.dropna().iloc[-1]) * 1e7  # Cr → INR
             result.pat_qoq_pct = _avg_qoq_pct(pat, 5)
-            ann_pat = _si_row_series(si_annual_df, ["Net Profit", "PAT"]) if ann_ok else None
+            ann_pat = _si_row_series(si_annual_df, pat_keys) if ann_ok else None
             result.pat_yoy_pct = _avg_qoq_pct(ann_pat, 5) if (ann_pat is not None and not ann_pat.dropna().empty) else _avg_yoy_pct(pat, 5)
             result.pat_yoy_3y_pct = _avg_qoq_pct(ann_pat, 3) if (ann_pat is not None and not ann_pat.dropna().empty) else _avg_yoy_pct(pat, 3)
 
         # ── EPS ────────────────────────────────────────────────────────────
-        if si_ok:
-            eps = _si_row_series(si_quarterly_df, ["EPS in Rs", "EPS"])
-        else:
-            eps = None
-        if eps is None or eps.dropna().empty:
-            eps_col = _find_col(income_df, ["EPS", "Basic EPS", "Diluted EPS"]) if income_df is not None else None
-            eps = _col_as_series(income_df, eps_col) if eps_col else None
-
+        eps = _si_row_series(si_quarterly_df, ["EPS in Rs", "EPS"])
         if eps is not None and not eps.dropna().empty:
-            result.eps_latest = float(eps.dropna().iloc[-1])   # EPS is ₹/share — no unit conversion
+            result.eps_latest = float(eps.dropna().iloc[-1])
             result.eps_qoq_pct = _avg_qoq_pct(eps, 5)
             ann_eps = _si_row_series(si_annual_df, ["EPS in Rs", "EPS"]) if ann_ok else None
             result.eps_yoy_pct = _avg_qoq_pct(ann_eps, 5) if (ann_eps is not None and not ann_eps.dropna().empty) else _avg_yoy_pct(eps, 5)
             result.eps_yoy_3y_pct = _avg_qoq_pct(ann_eps, 3) if (ann_eps is not None and not ann_eps.dropna().empty) else _avg_yoy_pct(eps, 3)
 
-        # ── EBITDA / Operating margin ──────────────────────────────────────
-        if si_ok:
-            # screener.in provides OPM % directly — use it
-            opm_pct = _si_row_series(si_quarterly_df, ["OPM %", "OPM%", "OPM"])
-            if opm_pct is not None and not opm_pct.dropna().empty:
-                result.ebitda_margin_latest_pct = round(float(opm_pct.dropna().iloc[-1]), 2)
-                result.ebitda_margin_trend = _trend(opm_pct, window=8)
-        if result.ebitda_margin_latest_pct is None and income_df is not None:
-            # fallback: compute from yfinance EBITDA / Revenue
-            ebitda_col = _find_col(income_df, ["EBITDA"])
-            rev_col_yf = _find_col(income_df, ["Revenue", "Sales", "Total Revenue"])
-            if ebitda_col and rev_col_yf:
-                ebitda = _col_as_series(income_df, ebitda_col)
-                rev_yf = _col_as_series(income_df, rev_col_yf)
-                ebitda_margin = (ebitda / rev_yf * 100).replace([np.inf, -np.inf], np.nan)
-                if not ebitda_margin.dropna().empty:
-                    result.ebitda_margin_latest_pct = round(float(ebitda_margin.dropna().iloc[-1]), 2)
-                    result.ebitda_margin_trend = _trend(ebitda_margin, window=8)
+        # ── EBITDA / Operating margin — screener.in OPM% ──────────────────
+        opm_pct = _si_row_series(si_quarterly_df, ["OPM %", "OPM%", "OPM"])
+        if opm_pct is not None and not opm_pct.dropna().empty:
+            result.ebitda_margin_latest_pct = round(float(opm_pct.dropna().iloc[-1]), 2)
+            result.ebitda_margin_trend = _trend(opm_pct, window=8)
 
-        # ── OCF quality — yfinance quarterly (fallback) ───────────────────
-        if cashflow_df is not None and not cashflow_df.empty:
-            ocf_col = _find_col(cashflow_df, ["OCF", "Operating Cash Flow"])
-            if ocf_col:
-                ocf = _col_as_series(cashflow_df, ocf_col)
-                result.ocf_latest = float(ocf.dropna().iloc[-1]) if not ocf.dropna().empty else None
-                result.ocf_trend = _trend(ocf, window=6)
-                if result.pat_latest and result.pat_latest != 0 and result.ocf_latest is not None:
-                    result.ocf_pat_ratio = round(result.ocf_latest / result.pat_latest, 2)
-
-        # ── Annual cash flows — screener.in (primary, reliable) ───────────
+        # ── Annual cash flows — screener.in ───────────────────────────────
         if si_cashflow_df is not None and not si_cashflow_df.empty:
             ocf_s = _si_row_series(si_cashflow_df, ["Cash from Operating", "Operating Activity", "operating"])
             icf_s = _si_row_series(si_cashflow_df, ["Cash from Investing", "Investing Activity", "investing"])
@@ -331,21 +305,49 @@ class BasicScreener:
                 result.si_cff_annual = float(cff_s.dropna().iloc[-1])
             if ncf_s is not None and not ncf_s.dropna().empty:
                 result.si_net_cf_annual = float(ncf_s.dropna().iloc[-1])
+                result.si_net_cf_1y_pct = _si_pct_change(ncf_s, 1)
+                result.si_net_cf_3y_pct = _si_pct_change(ncf_s, 3)
+                result.si_net_cf_5y_pct = _si_pct_change(ncf_s, 5)
             if result.si_ocf_annual is not None and result.si_icf_annual is not None:
                 result.si_fcf_annual = result.si_ocf_annual + result.si_icf_annual
 
             # OCF/PAT ratio using annual data — more reliable than quarterly
             if ann_ok and result.si_ocf_annual is not None:
-                ann_pat = _si_row_series(si_annual_df, ["Net Profit", "PAT"])
+                ann_pat = _si_row_series(si_annual_df, ["Net Profit", "PAT", "Profit after tax"])
                 if ann_pat is not None and not ann_pat.dropna().empty:
                     ann_pat_latest = float(ann_pat.dropna().iloc[-1])
                     if ann_pat_latest != 0:
+                        result.si_pat_annual = ann_pat_latest
                         result.si_ocf_pat_ratio = round(result.si_ocf_annual / ann_pat_latest, 2)
                         # Prefer annual OCF/PAT ratio over quarterly
                         result.ocf_pat_ratio = result.si_ocf_pat_ratio
 
+        # ── NPA (financial sector only) ────────────────────────────────────
+        if financial:
+            def _npa_chg(series: pd.Series, periods: int) -> Optional[float]:
+                """Absolute pp change: latest minus N quarters ago (4Q = 1Y)."""
+                s = series.dropna()
+                idx = periods * 4  # quarters per year
+                if len(s) < idx + 1:
+                    return None
+                curr, prev = float(s.iloc[-1]), float(s.iloc[-(idx + 1)])
+                return round(curr - prev, 2)
+
+            gnpa = _si_row_series(si_quarterly_df, ["Gross NPA"])
+            nnpa = _si_row_series(si_quarterly_df, ["Net NPA"])
+            if gnpa is not None and not gnpa.dropna().empty:
+                result.gross_npa_pct = float(gnpa.dropna().iloc[-1])
+                result.gross_npa_1y_chg = _npa_chg(gnpa, 1)
+                result.gross_npa_2y_chg = _npa_chg(gnpa, 2)
+                result.gross_npa_3y_chg = _npa_chg(gnpa, 3)
+            if nnpa is not None and not nnpa.dropna().empty:
+                result.net_npa_pct = float(nnpa.dropna().iloc[-1])
+                result.net_npa_1y_chg = _npa_chg(nnpa, 1)
+                result.net_npa_2y_chg = _npa_chg(nnpa, 2)
+                result.net_npa_3y_chg = _npa_chg(nnpa, 3)
+
         # --- Flags ---
-        self._apply_flags(result, cfg_g, cfg_p, income_df, cashflow_df, sector=sector)
+        self._apply_flags(result, cfg_g, cfg_p, sector=sector)
         result.score = self._compute_score(result, cfg_g, cfg_p, sector=sector)
         return result
 
@@ -354,8 +356,6 @@ class BasicScreener:
         result: BasicScreenResult,
         cfg_g: dict,
         cfg_p: dict,
-        income_df: pd.DataFrame,
-        cashflow_df: Optional[pd.DataFrame],
         sector: Optional[str] = None,
     ) -> None:
         financial = _is_financial(sector)
@@ -395,13 +395,38 @@ class BasicScreener:
         elif result.ebitda_margin_trend == "improving":
             result.flags.append(ScreenFlag(FlagLevel.GREEN, "Margin", "EBITDA margin improving trend"))
 
+        # NPA quality — financial sector only
+        if financial:
+            cfg_fin = self.cfg["financial_sector"] if hasattr(self, 'cfg') else {}
+            gnpa_green = cfg_fin.get("gross_npa_green_pct", 3.0)
+            gnpa_red   = cfg_fin.get("gross_npa_red_pct", 7.0)
+            nnpa_green = cfg_fin.get("net_npa_green_pct", 1.0)
+            nnpa_red   = cfg_fin.get("net_npa_red_pct", 3.0)
+            if result.gross_npa_pct is not None:
+                if result.gross_npa_pct > gnpa_red:
+                    result.flags.append(ScreenFlag(FlagLevel.RED, "AssetQuality", f"High Gross NPA: {result.gross_npa_pct:.2f}% (red > {gnpa_red}%)"))
+                elif result.gross_npa_pct > gnpa_green:
+                    result.flags.append(ScreenFlag(FlagLevel.YELLOW, "AssetQuality", f"Elevated Gross NPA: {result.gross_npa_pct:.2f}% (green < {gnpa_green}%)"))
+                else:
+                    result.flags.append(ScreenFlag(FlagLevel.GREEN, "AssetQuality", f"Healthy Gross NPA: {result.gross_npa_pct:.2f}%"))
+            if result.net_npa_pct is not None:
+                if result.net_npa_pct > nnpa_red:
+                    result.flags.append(ScreenFlag(FlagLevel.RED, "AssetQuality", f"High Net NPA: {result.net_npa_pct:.2f}% (red > {nnpa_red}%)"))
+                elif result.net_npa_pct > nnpa_green:
+                    result.flags.append(ScreenFlag(FlagLevel.YELLOW, "AssetQuality", f"Elevated Net NPA: {result.net_npa_pct:.2f}% (green < {nnpa_green}%)"))
+                else:
+                    result.flags.append(ScreenFlag(FlagLevel.GREEN, "AssetQuality", f"Well provisioned Net NPA: {result.net_npa_pct:.2f}%"))
+
         # OCF quality — not applicable for financial sector (lending = negative OCF by nature)
         if financial:
             result.flags.append(ScreenFlag(FlagLevel.GREEN, "CashQuality", "Financial sector — OCF/FCF checks not applicable (loan disbursements are operating cash outflows)"))
         else:
             if result.ocf_pat_ratio is not None:
+                ocf_trend_check = result.si_ocf_trend or result.ocf_trend
                 if result.ocf_pat_ratio < 0:
                     result.flags.append(ScreenFlag(FlagLevel.RED, "CashQuality", f"Negative OCF despite PAT: OCF/PAT = {result.ocf_pat_ratio:.2f}"))
+                    if ocf_trend_check == "stable":
+                        result.flags.append(ScreenFlag(FlagLevel.RED, "CashQuality", "Chronic negative OCF — has been negative for years, not a temporary dip"))
                 elif result.ocf_pat_ratio < cfg_p["ocf_pat_ratio_min"]:
                     result.flags.append(ScreenFlag(FlagLevel.YELLOW, "CashQuality", f"Low OCF/PAT ratio: {result.ocf_pat_ratio:.2f} (min {cfg_p['ocf_pat_ratio_min']})"))
                 else:
@@ -422,34 +447,58 @@ class BasicScreener:
         score = 50
         bd: dict = {"growth": 0, "profitability": 0, "cash_quality": 0, "penalties": 0}
 
+        def _growth_pts(pct5y, pct3y, threshold):
+            """Score growth using the worse of 3Y and 5Y averages to avoid masking recent deterioration."""
+            candidates = [p for p in (pct5y, pct3y) if p is not None]
+            if not candidates:
+                return None
+            pct = min(candidates)  # penalise if either period is bad
+            return (15 if pct >= threshold * 2 else
+                     8 if pct >= threshold else
+                     2 if pct >= 0 else -15)
+
         # Revenue growth (max ±15)
-        if result.revenue_yoy_pct is not None:
-            pts = 15 if result.revenue_yoy_pct >= cfg_g["revenue_yoy_min_pct"] * 2 else \
-                   8 if result.revenue_yoy_pct >= cfg_g["revenue_yoy_min_pct"] else \
-                   2 if result.revenue_yoy_pct >= 0 else -15
-            score += pts
-            bd["growth"] += pts
+        rev_pts = _growth_pts(result.revenue_yoy_pct, result.revenue_yoy_3y_pct, cfg_g["revenue_yoy_min_pct"])
+        if rev_pts is not None:
+            score += rev_pts
+            bd["growth"] += rev_pts
 
         # PAT growth (max ±15)
-        if result.pat_yoy_pct is not None:
-            pts = 15 if result.pat_yoy_pct >= cfg_g["pat_yoy_min_pct"] * 2 else \
-                   8 if result.pat_yoy_pct >= cfg_g["pat_yoy_min_pct"] else \
-                   2 if result.pat_yoy_pct >= 0 else -15
-            score += pts
-            bd["growth"] += pts
+        pat_pts = _growth_pts(result.pat_yoy_pct, result.pat_yoy_3y_pct, cfg_g["pat_yoy_min_pct"])
+        if pat_pts is not None:
+            score += pat_pts
+            bd["growth"] += pat_pts
 
-        # EBITDA margin (max ±10)
-        if result.ebitda_margin_latest_pct is not None:
+        # EBITDA margin (max ±10) — not applicable for financial sector
+        if not financial and result.ebitda_margin_latest_pct is not None:
             pts = 10 if result.ebitda_margin_latest_pct >= 20 else \
                    5 if result.ebitda_margin_latest_pct >= cfg_p["ebitda_margin_min_pct"] else -5
             score += pts
             bd["profitability"] += pts
-        if result.ebitda_margin_trend == "improving":
+        if not financial and result.ebitda_margin_trend == "improving":
             score += 5
             bd["profitability"] += 5
-        elif result.ebitda_margin_trend == "deteriorating":
+        elif not financial and result.ebitda_margin_trend == "deteriorating":
             score -= 10
             bd["profitability"] -= 10
+
+        # NPA scoring — financial sector only (replaces EBITDA margin, max ±20)
+        if financial:
+            cfg_fin = self.cfg["financial_sector"]
+            gnpa_green = cfg_fin.get("gross_npa_green_pct", 3.0)
+            gnpa_red   = cfg_fin.get("gross_npa_red_pct", 7.0)
+            nnpa_green = cfg_fin.get("net_npa_green_pct", 1.0)
+            nnpa_red   = cfg_fin.get("net_npa_red_pct", 3.0)
+            if result.gross_npa_pct is not None:
+                pts = 10 if result.gross_npa_pct <= gnpa_green else \
+                       0 if result.gross_npa_pct <= gnpa_red else -10
+                score += pts
+                bd["profitability"] += pts
+            if result.net_npa_pct is not None:
+                pts = 10 if result.net_npa_pct <= nnpa_green else \
+                       0 if result.net_npa_pct <= nnpa_red else -10
+                score += pts
+                bd["profitability"] += pts
 
         # OCF quality (max ±15) — skipped for financial sector
         if not financial and result.ocf_pat_ratio is not None:
@@ -458,12 +507,21 @@ class BasicScreener:
                   -5 if result.ocf_pat_ratio >= 0 else -15
             score += pts
             bd["cash_quality"] += pts
+            # Extra penalty for chronic negative OCF (not just a one-off dip)
+            ocf_trend_check = result.si_ocf_trend or result.ocf_trend
+            if result.ocf_pat_ratio < 0 and ocf_trend_check == "stable":
+                score -= 5
+                bd["cash_quality"] -= 5
 
-        # Red flag penalties
-        red_count = sum(1 for f in result.flags if f.level == FlagLevel.RED)
-        penalty = red_count * 5
+        # Red flag penalties — only for categories NOT already captured in numeric scoring above.
+        # Growth (revenue/PAT) and CashQuality (OCF) and Margin are already scored numerically,
+        # so we skip their red flags here to avoid double-counting.
+        _ALREADY_SCORED = {"Growth", "Margin", "CashQuality", "AssetQuality"}
+        red_flags = [f for f in result.flags if f.level == FlagLevel.RED and f.category not in _ALREADY_SCORED]
+        penalty = len(red_flags) * 5
         score -= penalty
         bd["penalties"] = -penalty
+        bd["penalty_flags"] = [f.message for f in red_flags]
 
         result.score_breakdown = bd
         return max(0, min(100, score))

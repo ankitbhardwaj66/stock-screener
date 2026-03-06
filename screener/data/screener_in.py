@@ -61,11 +61,26 @@ class ScreenerInFetcher:
 
     @staticmethod
     def _page_has_data(soup: BeautifulSoup) -> bool:
-        """Return True if the page contains at least one key financial data section."""
+        """Return True if the page has financial sections AND the quarters table has actual data columns."""
+        has_section = False
         for sid in ("quarters", "profit-loss", "balance-sheet"):
             if soup.find("section", {"id": sid}):
-                return True
-        return False
+                has_section = True
+                break
+        if not has_section:
+            return False
+        # Also verify the quarters table has more than just a label column (consolidated
+        # pages for some companies return a valid-looking page but with no value columns)
+        q_section = soup.find("section", {"id": "quarters"})
+        if q_section:
+            table = q_section.find("table")
+            if table:
+                first_tr = table.find("tr")
+                if first_tr:
+                    cols = first_tr.find_all(["th", "td"])
+                    if len(cols) < 2:
+                        return False
+        return True
 
     def _fetch_page(self, symbol: str) -> Optional[BeautifulSoup]:
         """Fetch screener.in page — tries consolidated first, falls back to standalone.
@@ -152,7 +167,15 @@ class ScreenerInFetcher:
         if not data_rows:
             return None
 
-        # Ensure all rows same length as headers
+        # Detect max row width from data rows
+        max_cols = max(len(r) for r in data_rows)
+
+        # If the header has only 1 cell but data rows are wider, the header row
+        # only contained the empty label cell — generate synthetic column names
+        if headers and len(headers) < max_cols:
+            n_value_cols = max_cols - 1   # minus label column
+            headers = [headers[0]] + [f"col_{i}" for i in range(1, n_value_cols + 1)]
+
         if headers:
             n = len(headers)
             padded = [r + [""] * max(0, n - len(r)) for r in data_rows]
@@ -190,6 +213,57 @@ class ScreenerInFetcher:
             self.cache.write(symbol, "si_annual", df)
         return df
 
+    def _get_company_id(self, soup: BeautifulSoup) -> Optional[str]:
+        """Extract screener.in numeric company ID from page HTML."""
+        el = soup.find(attrs={"data-company-id": True})
+        if el:
+            return el.get("data-company-id")
+        return None
+
+    def _is_consolidated(self, soup: BeautifulSoup) -> bool:
+        """Return True if the fetched page is the consolidated view."""
+        return bool(soup.find(attrs={"data-consolidated": True}))
+
+    def _fetch_schedule(
+        self, company_id: str, parent: str, section: str, consolidated: bool
+    ) -> Optional[dict]:
+        """Fetch sub-row data for a balance-sheet parent row via screener.in's internal API."""
+        from urllib.parse import quote
+        params = f"parent={quote(parent)}&section={section}"
+        if consolidated:
+            params += "&consolidated="
+        url = f"https://www.screener.in/api/company/{company_id}/schedules/?{params}"
+        try:
+            import time as _time
+            import random as _random
+            _time.sleep(_random.uniform(0.5, 1.0))
+            resp = self._session.get(
+                url, timeout=15,
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return None
+
+    def _merge_schedule_rows(self, df: pd.DataFrame, schedule: dict) -> pd.DataFrame:
+        """Append schedule sub-rows (from schedules API) into the balance sheet DataFrame."""
+        if not schedule:
+            return df
+        label_col = df.columns[0]
+        year_cols = list(df.columns[1:])
+        new_rows = []
+        for row_label, year_data in schedule.items():
+            row = {label_col: row_label}
+            for col in year_cols:
+                row[col] = year_data.get(str(col), "")
+            new_rows.append(row)
+        if new_rows:
+            sched_df = pd.DataFrame(new_rows, columns=df.columns)
+            df = pd.concat([df, sched_df], ignore_index=True)
+        return df
+
     def get_balance_sheet(self, symbol: str) -> Optional[pd.DataFrame]:
         cached = self.cache.read(symbol, "si_balance")
         if cached is not None:
@@ -198,8 +272,19 @@ class ScreenerInFetcher:
         if not soup:
             return None
         df = self._parse_section_table(soup, "balance-sheet")
-        if df is not None and not df.empty:
-            self.cache.write(symbol, "si_balance", df)
+        if df is None or df.empty:
+            return None
+
+        # Enrich with sub-rows (Cash Equivalents, LT/ST Borrowings) via schedules API
+        company_id = self._get_company_id(soup)
+        if company_id:
+            consolidated = self._is_consolidated(soup)
+            for parent in ["Other Assets", "Borrowings"]:
+                schedule = self._fetch_schedule(company_id, parent, "balance-sheet", consolidated)
+                if schedule:
+                    df = self._merge_schedule_rows(df, schedule)
+
+        self.cache.write(symbol, "si_balance", df)
         return df
 
     def get_cash_flow(self, symbol: str) -> Optional[pd.DataFrame]:

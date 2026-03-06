@@ -110,7 +110,7 @@ Red flags deduct points (configurable in `config/thresholds.yaml`). Each red fla
 | Debtor days | < 90 days |
 | Inventory days | < 120 days |
 | P/E vs 5Y historical mean | < 0.75x mean = historically cheap |
-| OCF declining 3Q + PAT rising | = earnings quality red flag |
+| Net Cash Flow (annual) | YoY trend — 1Y / 3Y / 5Y Δ% |
 
 All thresholds are configurable in `config/thresholds.yaml`.
 
@@ -120,8 +120,10 @@ All thresholds are configurable in `config/thresholds.yaml`.
 
 | Source | Data Provided |
 |--------|--------------|
-| **yfinance** | Price, quarterly income / balance / cashflow, historical P/E (1Y / 5Y / 10Y) |
-| **screener.in** | ROE, ROCE, D/E, shareholding pattern (promoter / FII / DII / public), promoter pledge, working capital ratios (debtor days, inventory days, CCC), quarterly audit PDF links |
+| **yfinance** | Current price, historical P/E (1Y / 5Y / 10Y), price trend |
+| **screener.in** | All financials — P&L (quarterly + annual), balance sheet (incl. Cash Equivalents, LT/ST Borrowings via internal API), cash flow, shareholding pattern (promoter / FII / DII / public), promoter pledge, working capital ratios, quarterly audit PDF links |
+
+All financial statement data (revenue, PAT, OCF, debt, cash equivalents) comes exclusively from screener.in. yfinance is used only for price data.
 
 Both sources are cached locally as CSV files with a 24-hour TTL to avoid repeated network calls.
 

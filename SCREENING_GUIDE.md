@@ -92,7 +92,9 @@ OCF/PAT Ratio = Operating Cash Flow / Net Profit After Tax
 - Inventory pile-up
 - Related party transactions inflating paper profits
 
-**CLI shows** the OCF/PAT ratio with a **5-year trend direction** (improving ↑ / stable → / deteriorating ↓) alongside the ✓/✗ pass/fail check.
+**CLI shows** the OCF/PAT ratio with the actual annual figures used `(OCF -81 / PAT 107 Cr)`, a **5-year trend direction** (improving ↑ / stable → / deteriorating ↓), and a ✓/✗ pass/fail check.
+
+> **Important:** The OCF/PAT ratio always uses **annual** OCF and **annual** PAT (full fiscal year). The "Latest Value" column in Growth Metrics shows the most recent **quarterly** PAT, which will be ~¼ of the annual figure. Do not confuse the two when verifying the ratio manually.
 
 > **⚠ Financial sector exception:** For banks, NBFCs, HFCs, and insurance companies, negative OCF is **normal and expected**. Loan disbursements are classified as operating cash outflows under accounting standards. The CLI automatically detects financial sector companies and skips the OCF/PAT check entirely for them. A `[GREEN] CashQuality: Financial sector — OCF/FCF checks not applicable` flag will appear in the output.
 
@@ -104,8 +106,11 @@ OCF/PAT Ratio = Operating Cash Flow / Net Profit After Tax
 
 **Debt/Equity Ratio (D/E)**
 ```
-D/E = Total Debt / Shareholders' Equity
+D/E = Total Borrowings / (Equity Capital + Reserves)
 ```
+
+> **CLI data source:** D/E is taken from screener.in's top ratios panel when available. If not shown there (screener.in omits it for some stocks), it is computed directly from the balance sheet as `Borrowings / (Equity Capital + Reserves)`.
+
 
 | D/E | Signal | Note |
 |-----|--------|------|
@@ -294,14 +299,9 @@ Forward P/E = Price / Next 12 months estimated EPS
 - A P/E of 50 for a 40% growth company may be cheap (PEG < 1.25)
 - A P/E of 15 for a declining business is expensive
 
-| P/E Range | Signal (for average Indian company) | CLI Score |
-|-----------|-------------------------------------|-----------|
-| < 15 | Very cheap | +10 |
-| 15–40 | Reasonable | +5 |
-| 40–60 | High expectations priced in | −5 |
-| > 60 | Speculative | −10 |
+Absolute P/E thresholds are **not used for scoring** — a P/E of 60 may be cheap for a stock that historically trades at 80, and a P/E of 10 may be expensive for a stock that historically trades at 8. The CLI shows current P/E for reference only and scores entirely on the historical mean comparison below.
 
-**Historical P/E vs Mean (most powerful valuation signal):**
+**Historical P/E vs Mean (the only P/E signal that matters for scoring):**
 
 Compare the current P/E to the stock's own 5-year (or 1-year) mean P/E. This accounts for sector-specific re-rating and is far more useful than an absolute P/E threshold.
 
@@ -407,7 +407,7 @@ Dividend Yield = Annual DPS / Market Price × 100
 ### 6.3 Cash Flow Red Flags
 
 - [ ] Negative OCF with positive PAT *(except financial sector — see Section 6.1)*
-- [ ] OCF declining 3+ consecutive quarters while PAT rises
+- [ ] Chronic negative OCF with a stable (non-improving) trend — company structurally burning cash
 - [ ] Consistently negative FCF for 3+ years (capex-heavy without visible payoff)
 - [ ] Investing cash outflows > operating cash inflows without a clear capex story
 - [ ] Cash from financing (borrowing) used to pay dividends
@@ -581,7 +581,7 @@ Starting score: **50**
 | **Promoter Holding 6Q** | > +2%: +2 · < −3%: −2 | ±2 |
 | **FII Activity QoQ** | ≥ +2%: +6 · ≥ +1%: +3 · ≤ −1%: −3 · ≤ −2%: −6 | ±6 |
 | **DII Activity QoQ** | ≥ +1%: +3 · ≤ −1%: −3 | ±3 |
-| **P/E Ratio** | < 15: +10 · < 40: +5 · < 60: −5 · ≥ 60: −10 | ±10 |
+| **P/E Ratio** | Display only — not scored. Absolute P/E is context-dependent. | — |
 | **PEG Ratio** ⁴ | < 0.75: +6 · ≤ 1.5: +3 · ≤ 2.5: −4 · > 2.5: −6 | ±6 |
 | **P/E vs 5Y Mean** ³ | < 0.70×: +8 · < 0.90×: +4 · ≤ 1.15×: 0 · ≤ 1.40×: −4 · > 1.40×: −8 | ±8 |
 | **Red Flag Penalty** | −5 per RED flag | variable |

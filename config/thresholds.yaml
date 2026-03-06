@@ -46,6 +46,10 @@ financial_sector:
   de_ratio_max: 5.0               # Normal leverage for NBFCs/HFCs
   de_ratio_red: 8.0               # Red flag leverage
   ocf_checks_applicable: false    # OCF/PAT ratio and FCF checks are not meaningful
+  gross_npa_green_pct: 3.0        # Gross NPA below this = healthy
+  gross_npa_red_pct: 7.0          # Gross NPA above this = red flag
+  net_npa_green_pct: 1.0          # Net NPA below this = well provisioned
+  net_npa_red_pct: 3.0            # Net NPA above this = red flag
 
 contingent_liabilities:
   net_worth_ratio_max: 0.5        # Contingent liabilities > 50% net worth = RED
