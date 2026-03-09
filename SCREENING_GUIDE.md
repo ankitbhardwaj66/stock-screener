@@ -63,6 +63,14 @@ PAT quality matters more than PAT quantum.
 - **Tax rate anomalies**: Unusually low effective tax rate (<15%) — check for deferred tax assets or one-time exemptions.
 - **Minority interest**: In consolidated results, large minority interest deductions can distort PAT picture.
 
+**PAT QoQ suppression signal:**
+
+The CLI shows PAT Avg QoQ as `—` (a dash) when the 5-quarter rolling average cannot be computed because **more than half of the recent quarterly transitions had a negative base** (i.e., the company was loss-making for most of the last 5 quarters). This is not a data gap — it is a deliberate suppression to avoid showing a misleadingly positive average driven by a loss-to-profit swing.
+
+When PAT QoQ is suppressed, the CLI applies a **−10 pts penalty** and raises a RED flag. Note that the YoY annual averages can still appear positive (e.g., +89% 3Y) if the company recovered from losses — but the quarterly trend tells a different story. Always check both.
+
+A company can show strong 3Y/5Y annual growth but have a suppressed QoQ — this often indicates a **recent earnings collapse** after a high-base period, or a company that flip-flops between small profits and losses each quarter.
+
 ### 1.4 EPS (Earnings Per Share)
 
 - Use **Diluted EPS** for proper comparison (accounts for warrants, ESOPs)
@@ -97,6 +105,21 @@ OCF/PAT Ratio = Operating Cash Flow / Net Profit After Tax
 > **Important:** The OCF/PAT ratio always uses **annual** OCF and **annual** PAT (full fiscal year). The "Latest Value" column in Growth Metrics shows the most recent **quarterly** PAT, which will be ~¼ of the annual figure. Do not confuse the two when verifying the ratio manually.
 
 > **⚠ Financial sector exception:** For banks, NBFCs, HFCs, and insurance companies, negative OCF is **normal and expected**. Loan disbursements are classified as operating cash outflows under accounting standards. The CLI automatically detects financial sector companies and skips the OCF/PAT check entirely for them. A `[GREEN] CashQuality: Financial sector — OCF/FCF checks not applicable` flag will appear in the output.
+
+> **⚠ Ind AS 116 (lease-heavy) exception:** Cinema chains, airlines, QSR/restaurant chains, retailers, and telecom companies capitalise long-term leases under Ind AS 116. This creates lease depreciation + interest on the P&L, making PAT artificially low (or negative) even when the business is generating strong cash. **OCF/PAT is meaningless for these companies.** The CLI uses **OCF/EBITDA** as the primary cash quality metric instead:
+
+```
+OCF/EBITDA = Operating Cash Flow / EBITDA
+```
+
+| OCF/EBITDA | Interpretation |
+|------------|----------------|
+| ≥ 1.0 | Excellent — collecting more cash than operating profit |
+| ≥ 0.85 | Good |
+| ≥ 0.70 | Acceptable |
+| < 0.70 | Investigate |
+
+For a cinema chain with 30% EBITDA margin, an OCF/EBITDA of 0.85–1.0 is healthy and means lease payments are comfortably covered by operations. The OCF/PAT ratio for the same company might be −10× — completely misleading. The CLI auto-detects lease-heavy companies by sector keywords and by a mathematical check (OCF/EBITDA > 0.5 AND OCF/PAT < −5).
 
 ---
 
@@ -277,6 +300,16 @@ DII (Domestic Institutional Investors) = Mutual Funds + Insurance companies + Pe
 | 0 to −1% | 0 |
 | ≤ −1% | −3 |
 
+**Combined FII + DII Exit (−10 pts, RED flag):**
+
+When **both FII and DII reduce holding by ≥ 1% in the same quarter**, the CLI applies an additional −10 pts penalty and raises a RED flag labelled "institutional exit". This is one of the most bearish signals: domestic and foreign institutions simultaneously exiting means neither group sees value at the current price.
+
+> This −10 is applied **in addition to** the individual FII and DII penalties above, so the total shareholding impact from a combined exit can reach −10 (FII) − 3 (DII) − 10 (combined) = −19 pts before any individual component caps.
+
+**Public Holding > 30% (−5 pts):**
+
+High public (retail) float means promoters + institutions together hold less than 70%. This signals weak conviction from informed money. It can also mean the stock is more susceptible to retail sentiment-driven volatility.
+
 ### 4.5 Shareholding Concentration Risk
 
 - If top 5 shareholders hold > 80%, liquidity is thin
@@ -371,6 +404,10 @@ PEG = P/E Ratio / EPS Growth Rate (%)
 
 Rule of thumb: PEG < 1 = growth is "on sale".
 
+**Which growth rate to use:** The CLI uses **3-year profit CAGR** (same methodology as screener.in's PEG display), falling back to 5Y when 3Y is unavailable. Using 3Y avoids COVID-year distortions: a company with a loss in FY21 will show a very low 5Y average PAT growth even if its last 3 years have been strong. The 3Y CAGR captures the current growth trajectory more accurately.
+
+**Example:** Godrej Properties — screener.in shows PEG 0.57 using 3Y profit CAGR of ~55%. Using 5Y average (dragged down by FY21 loss year) gives ~3.5% growth → PEG 8.9, wildly different and misleading.
+
 ### 5.5 Dividend Yield
 
 ```
@@ -407,6 +444,7 @@ Dividend Yield = Annual DPS / Market Price × 100
 ### 6.3 Cash Flow Red Flags
 
 - [ ] Negative OCF with positive PAT *(except financial sector — see Section 6.1)*
+- [ ] Very negative OCF/PAT for cinema/QSR/airline/retail — check OCF/EBITDA instead *(Ind AS 116 distortion — see Section 7.6)*
 - [ ] Chronic negative OCF with a stable (non-improving) trend — company structurally burning cash
 - [ ] Consistently negative FCF for 3+ years (capex-heavy without visible payoff)
 - [ ] Investing cash outflows > operating cash inflows without a clear capex story
@@ -535,6 +573,66 @@ Dividend Yield = Annual DPS / Market Price × 100
 - Subcontracting margins being squeezed
 - Debt funding bridge between order execution and payment
 
+### 7.6 Lease-Heavy / Ind AS 116 Companies
+
+Applies to: cinema chains (PVR INOX, Inox Leisure), airlines (IndiGo, SpiceJet), QSR chains (Devyani International, Restaurant Brands Asia, Westlife Foodworld), organised retailers, telecom operators (Bharti Airtel), and hospitality companies.
+
+**What Ind AS 116 does:**
+Under Ind AS 116, a long-term operating lease (e.g., a cinema rents a mall space for 15 years) is treated like a loan purchase:
+- A **Right-of-Use (ROU) asset** appears on the balance sheet
+- A corresponding **lease liability** appears as debt
+- The P&L shows **depreciation** on the ROU asset + **interest** on the lease liability, instead of the simple rent expense it used to show
+
+**Consequence:** Even profitable cinema chains report negative or very low PAT because lease depreciation can exceed operating profit at the EBIT level. This is largely a **non-cash / accounting charge**, not a sign of financial distress — the actual cash rent (lease payment) still flows out through financing activities.
+
+**How to evaluate these companies:**
+
+| Metric | Why It Matters |
+|--------|---------------|
+| EBITDA Margin | Operating profitability before lease accounting distortion |
+| OCF/EBITDA | Cash conversion after all operating expenses but before lease liability repayment — the correct cash quality check |
+| Interest Coverage (EBIT/Interest) | Shows if operating profit covers all interest, including lease interest |
+| Lease Liability / EBITDA | Rough measure of how many years of operating profit to retire all lease obligations |
+
+**PVR INOX example:** FY25 — EBITDA ~₹1,500 Cr (30% margin), but PAT near zero due to ~₹800–1,000 Cr of lease depreciation + interest. OCF was strongly positive. The company is cash-generating; the P&L looks weak purely due to accounting treatment of leases.
+
+**Warning signs specific to these companies:**
+- OCF/EBITDA declining toward 0.5 or below → lease obligations consuming nearly all operating cash
+- Lease liability growing much faster than EBITDA (over-expansion into new locations)
+- Negative EBITDA → the business itself is structurally loss-making, not just lease-depressed
+
+> **CLI behaviour:** The CLI automatically detects lease-heavy companies by sector keyword and mathematical fallback, replaces OCF/PAT with OCF/EBITDA as the primary scored cash quality metric, and suppresses misleading OCF/PAT flags.
+
+### 7.7 Real Estate Developers
+
+Applies to: Godrej Properties, DLF, Prestige Estates, Sobha, Puravankara, Macrotech (Lodha), etc.
+
+**Why standard metrics mislead for real estate:**
+
+1. **Revenue recognition (Ind AS 115):** Revenue is only recognised when a project is handed over (completion method). A developer may sell ₹5,000 Cr of flats in FY25 but only hand over ₹2,000 Cr — the rest stays in Customer Advances (liability). P&L revenues can be volatile even when the business is healthy.
+
+2. **Consolidated vs standalone EBITDA:** Consolidated P&L includes SPV (Special Purpose Vehicle) subsidiaries that book the full construction cost before the project completes and revenue is recognised. This makes consolidated EBITDA margin appear negative (−2% to −5%) for even profitable developers. Always check **standalone OPM** alongside consolidated.
+
+3. **Customer Advances as risk offset:** Homebuyers typically pay 10–30% upfront before construction begins. This pre-funding reduces the real risk of high borrowings — the advances will convert to revenue and help retire debt.
+
+**The three metrics the CLI tracks for real estate:**
+
+| Metric | Formula | Interpretation |
+|--------|---------|----------------|
+| **Pre-sales Coverage** | Customer Advances ÷ Borrowings | ≥ 1.0x = fully backed · ≥ 0.5x = adequate · < 0.3x = risk |
+| **Net Debt Post-Advances** | (Borrowings − Cash − Customer Advances) ÷ Equity | < 1.0x = comfortable · > 2.0x = concern |
+| **Inventory Velocity** | Inventory ÷ Annual Revenue | < 2Y = fast-moving · > 4Y = potential demand weakness |
+
+**Pre-sales coverage > 1.0x** means buyers have already funded more than the total borrowings — even if project revenues are delayed, the developer has collected cash to cover the debt. This is a very positive signal.
+
+**Inventory velocity > 4 years** means the developer has 4+ years of unsold inventory at the current sales run-rate — either demand has slowed, the project is in a slow market, or the developer over-acquired land.
+
+**Watch for:**
+- Customer Advances declining while borrowings rising (sales slowing, debt-funded construction continuing)
+- High inventory velocity in a rising interest rate environment (buyers deferring purchase decisions)
+- Consolidated EBITDA negative for multiple years (consolidated losses, not just recognition timing)
+- Related party transactions between listed developer and private SPVs
+
 ---
 
 ## 7. Quantitative Scorecard — CLI Scoring Reference
@@ -555,12 +653,23 @@ Starting score: **50**
 |-----------|----------|--------|
 | **Revenue YoY Growth** | ≥ 20%: +15 · ≥ 10%: +8 · ≥ 0%: +2 · < 0%: −15 | ±15 |
 | **PAT YoY Growth** | ≥ 20%: +15 · ≥ 10%: +8 · ≥ 0%: +2 · < 0%: −15 | ±15 |
+| **PAT QoQ Chronic Loss** ³ | Majority of recent 5 quarters had losses → −10 | −10 |
 | **EBITDA Margin** | ≥ 20%: +10 · ≥ 10%: +5 · < 10%: −5 | ±10 |
 | **EBITDA Trend** | Improving: +5 · Stable: 0 · Deteriorating: −10 | ±10 |
 | **OCF/PAT Ratio** ¹ | ≥ 1.0: +10 · ≥ 0.75: +5 · ≥ 0: −5 · < 0: −15 | ±15 |
+| **OCF/EBITDA Ratio** ² | ≥ 1.0: +15 · ≥ 0.85: +8 · ≥ 0.70: +3 · < 0.70: −10 | ±15 |
+| **Gross NPA %** ⁴ | ≤ 1.5%: +15 · ≤ 3%: +10 · ≤ 5%: −5 · ≤ 7%: −10 · > 7%: −15 | ±15 |
+| **Net NPA %** ⁴ | ≤ 0.5%: +10 · ≤ 1%: +5 · ≤ 2%: −5 · ≤ 3%: −10 · > 3%: −15 | ±10 |
+| **NPA 1Y Trend** ⁴ | Gross NPA improved > 1pp: +5 · improved < 1pp: +2 · worsened < 1pp: −2 · worsened > 1pp: −5 | ±5 |
 | **Red Flag Penalty** | −5 per RED flag | variable |
 
-> ¹ OCF/PAT check is **skipped entirely** for financial sector companies (banks, NBFCs, HFCs, insurance). No points added or deducted.
+> ¹ OCF/PAT is the primary cash quality metric for standard (non-financial, non-lease-heavy) companies. **Skipped entirely** for financial sector (banks, NBFCs, HFCs, insurance) and Ind AS 116 lease-heavy companies.
+>
+> ² OCF/EBITDA **replaces OCF/PAT** as the primary cash quality metric for Ind AS 116 lease-heavy companies (cinema, aviation, QSR, retail, telecom, hospitality). Not scored for financial sector companies. Shown as reference for all other companies but only scored for lease-heavy.
+>
+> ³ PAT QoQ is shown as `—` in the Growth Metrics table when suppressed. Suppression occurs when more than half of the recent 5 quarterly transitions had a negative base value (i.e., company was loss-making for most recent quarters). This −10 penalty fires regardless of the YoY annual averages, which can look positive due to a low-base recovery effect.
+>
+> ⁴ Financial sector only (banks, NBFCs, HFCs, insurance). NPA scoring appears in a separate "Asset Quality" section with its own score contribution in the breakdown panel.
 
 YoY growth uses **annual data** from screener.in (5 fiscal years) as the primary source, falling back to quarterly YoY averages when annual data is unavailable.
 
@@ -570,9 +679,9 @@ Starting score: **50**
 
 | Component | Criteria | Points |
 |-----------|----------|--------|
-| **ROE** | ≥ 30%: +10 · ≥ 15%: +5 · < 15%: −5 | ±10 |
-| **ROCE** | ≥ 24%: +8 · ≥ 12%: +4 · < 12%: −4 | ±8 |
-| **D/E Ratio** ² | < 0.5: +12 · < 1.0: +6 · < 2.0: −6 · ≥ 2.0: −12 | ±12 |
+| **ROE** ² | ≥ 30%: +10 · ≥ 15%: +5 · 0–15%: −5 · −10–0%: −10 · < −10%: −15 | ±15 |
+| **ROCE** ² | ≥ 24%: +8 · ≥ 12%: +4 · 0–12%: −4 · −5–0%: −8 · < −5%: −12 | ±12 |
+| **D/E Ratio** ³ | < 0.5: +12 · < 1.0: +6 · < 2.0: −6 · ≥ 2.0: −12 | ±12 |
 | **Interest Coverage** | ≥ 6x: +6 · ≥ 3x: +3 · < 3x: −6 | ±6 |
 | **FCF (latest qtr)** | Positive: +5 · Negative: −5 | ±5 |
 | **Promoter Pledge** | 0%: +5 · ≤ 10%: +2 · ≤ 25%: −5 · > 25%: −10 | ±10 |
@@ -581,16 +690,26 @@ Starting score: **50**
 | **Promoter Holding 6Q** | > +2%: +2 · < −3%: −2 | ±2 |
 | **FII Activity QoQ** | ≥ +2%: +6 · ≥ +1%: +3 · ≤ −1%: −3 · ≤ −2%: −6 | ±6 |
 | **DII Activity QoQ** | ≥ +1%: +3 · ≤ −1%: −3 | ±3 |
+| **FII + DII Both Selling** | Both ≤ −1% QoQ simultaneously: −10 (RED flag — institutional exit) | −10 |
+| **Public Holding** | > 30%: −5 (high retail float = weak institutional/promoter conviction) | −5 |
 | **P/E Ratio** | Display only — not scored. Absolute P/E is context-dependent. | — |
-| **PEG Ratio** ⁴ | < 0.75: +6 · ≤ 1.5: +3 · ≤ 2.5: −4 · > 2.5: −6 | ±6 |
-| **P/E vs 5Y Mean** ³ | < 0.70×: +8 · < 0.90×: +4 · ≤ 1.15×: 0 · ≤ 1.40×: −4 · > 1.40×: −8 | ±8 |
+| **PEG Ratio** ⁵ | < 0.75: +6 · ≤ 1.5: +3 · ≤ 2.5: −4 · > 2.5: −6 | ±6 |
+| **P/E vs 5Y Mean** ⁴ | < 0.70×: +8 · < 0.90×: +4 · ≤ 1.15×: 0 · ≤ 1.40×: −4 · > 1.40×: −8 | ±8 |
+| **Real Estate Metrics** ⁶ | Pre-sales coverage + Net Debt + Inventory Velocity | ±28 |
 | **Red Flag Penalty** | −5 per RED flag | variable |
 
-> ² Financial sector D/E thresholds: < 5.0: +6 · < 8.0: −6 · ≥ 8.0: −12 (relaxed for NBFCs/banks/HFCs)
+> ² Negative ROE (equity erosion) and negative ROCE (capital destruction) now generate a **RED flag** and carry heavier penalties than simply being below the threshold. The gradient ensures a company with −23% ROE scores very differently from one at 14%.
 >
-> ³ Falls back to 1Y historical mean if 5Y data is unavailable.
+> ³ Financial sector D/E thresholds: < 5.0: +6 · < 8.0: −6 · ≥ 8.0: −12 (relaxed for NBFCs/banks/HFCs)
 >
-> ⁴ PEG = P/E ÷ EPS YoY growth %. Only shown when both P/E and positive EPS growth are available. Not computed when EPS growth is negative (negative PEG is meaningless).
+> ⁴ Falls back to 1Y historical mean if 5Y data is unavailable.
+>
+> ⁵ PEG = P/E ÷ EPS growth %. Uses **3Y profit CAGR** (same standard as screener.in) — preferring 3Y over 5Y to avoid COVID-loss-year distortion. Falls back to 5Y when 3Y is unavailable. Only computed when P/E and positive growth are available.
+>
+> ⁶ Real Estate scoring (only applies to real estate / construction companies):
+> - Pre-sales coverage: ≥ 1.0x: +10 · ≥ 0.5x: +5 · ≥ 0.3x: 0 · < 0.3x: −10
+> - Net Debt post-advances: < 1.0x: +10 · < 1.5x: +5 · < 2.0x: 0 · ≥ 2.0x: −8
+> - Inventory velocity: < 2Y: +8 · < 3Y: +4 · < 4Y: 0 · ≥ 4Y: −6
 
 ### 8.3 Score Breakdown Panel (CLI output)
 
@@ -604,6 +723,7 @@ Base (start of both screeners)    50         —      +50 pts
 Basic Screener  (×0.4)
   Growth                         +30 pts    ×0.4   +12 pts
   Profitability                  +10 pts    ×0.4    +4 pts
+  Asset Quality  ¹               -15 pts    ×0.4    -6 pts   (financial sector only)
   Cash Quality                    +0 pts    ×0.4    +0 pts
   Penalties                       +0 pts    ×0.4    +0 pts
 ────────────────────────────────────────────────────────
@@ -614,8 +734,10 @@ Advanced Screener  (×0.6)
   Valuation                      +18 pts    ×0.6   +11 pts
   Penalties                       +0 pts    ×0.6    +0 pts
 ════════════════════════════════════════════════════════
-TOTAL                                               +81 pts
+TOTAL                                               +75 pts
 ```
+
+> ¹ Asset Quality row only appears in the breakdown panel when NPA points are non-zero (financial sector companies only).
 
 Each section title in the report also shows its raw point contribution: `Growth Metrics  (+30 pts)`.
 
@@ -634,17 +756,20 @@ Each section title in the report also shows its raw point contribution: `Growth 
 | # | Parameter | Your Assessment | Max | Notes |
 |---|-----------|----------------|-----|-------|
 | 1 | Revenue Growth YoY (3Y + 5Y avg) | | 15 | |
-| 2 | PAT Growth YoY (3Y + 5Y avg) | | 15 | |
+| 2 | PAT Growth YoY (3Y + 5Y avg) + QoQ | | 25 | −10 extra if QoQ suppressed (chronic losses) |
 | 3 | EBITDA Margin + Trend | | 20 | |
-| 4 | OCF Quality (OCF/PAT ratio) | | 15 | Skip for financials |
-| 5 | ROE | | 10 | |
-| 6 | ROCE | | 8 | |
-| 7 | Debt Health (D/E + ICR + FCF) | | 18 | Adjust for financials |
-| 8 | Promoter Pledge + Holding Change | | 20 | |
-| 9 | FII + DII Activity | | 9 | |
-| 10 | Valuation (P/E + vs history) | | 18 | |
-| 11 | Red Flags (count) | | penalty | −5 per RED flag |
-| — | **TOTAL** | | **~120** | normalise to 100 |
+| 4 | OCF Quality (OCF/PAT or OCF/EBITDA) | | 15 | Skip for financials; use OCF/EBITDA for lease-heavy |
+| 5 | Asset Quality / NPA (financials only) | | 30 | Graduated: Gross NPA + Net NPA + 1Y trend |
+| 6 | ROE | | 15 | Negative ROE → RED flag + up to −15 pts |
+| 7 | ROCE | | 12 | Negative ROCE → RED flag + up to −12 pts |
+| 8 | Debt Health (D/E + ICR + FCF) | | 18 | Adjust for financials; Net Debt/EBITDA skip for RE |
+| 9 | Promoter Pledge + Holding Change | | 20 | |
+| 10 | FII + DII Activity | | 19 | Includes −10 for combined institutional exit |
+| 11 | Public Holding | | 5 | > 30% → −5 pts |
+| 12 | Valuation (PEG 3Y + P/E vs history) | | 18 | |
+| 13 | Real Estate Metrics (RE only) | | 28 | Pre-sales coverage, Net Debt, Inventory Velocity |
+| 14 | Red Flags (count) | | penalty | −5 per RED flag |
+| — | **TOTAL** | | **~150** | normalise to 100 |
 
 ---
 
@@ -652,11 +777,12 @@ Each section title in the report also shows its raw point contribution: `Growth 
 
 ### Must-Check 5 Things Every Quarter
 
-1. **OCF vs PAT** — Did cash flow match profit? (OCF/PAT < 0.5 = investigate; skip for NBFCs/banks)
-2. **Promoter Pledge** — Did pledge % go up? (Any increase = flag; > 5% QoQ = RED)
-3. **Debtor Days** — Are customers paying faster or slower? (> 90 days = YELLOW)
-4. **Audit Opinion** — Any qualifications or emphasis of matter?
-5. **Debt + Interest Coverage** — Can company service its debt comfortably?
+1. **OCF vs PAT** — Did cash flow match profit? (OCF/PAT < 0.5 = investigate; skip for NBFCs/banks; use OCF/EBITDA for cinema/aviation/QSR/retail/telecom)
+2. **PAT QoQ** — Is it showing `—`? If suppressed, the company has been loss-making in most recent quarters — treat as RED regardless of long-term averages
+3. **Promoter Pledge** — Did pledge % go up? (Any increase = flag; > 5% QoQ = RED)
+4. **Both FII + DII selling** — Are both institutions exiting simultaneously? (strongest bearish signal in shareholding)
+5. **Debt + Interest Coverage + ROE** — Is the company covering its debt AND generating returns above cost of capital? (negative ROE = equity erosion = RED)
+6. **Audit Opinion** — Any qualifications or emphasis of matter? (for banks: also check NPA trend direction)
 
 ### 3Y vs 5Y YoY — Reading the Growth Story
 

@@ -82,6 +82,32 @@ class ScreenerInFetcher:
                         return False
         return True
 
+    @staticmethod
+    def _page_has_recent_annual_data(soup: BeautifulSoup, min_recent: int = 2, window: int = 5) -> bool:
+        """Return True if the profit-loss table has at least `min_recent` column years within
+        the last `window` years. This guards against consolidated pages that have a recent year
+        but are missing intermediate years (e.g. Mar 2019 → Mar 2025 gap), making 3Y/5Y YoY
+        averages unreliable — in such cases we fall back to standalone.
+        """
+        import datetime
+        cutoff = datetime.date.today().year - window
+        pl_section = soup.find("section", {"id": "profit-loss"})
+        if not pl_section:
+            return True  # can't tell — don't reject
+        table = pl_section.find("table")
+        if not table:
+            return True
+        first_tr = table.find("tr")
+        if not first_tr:
+            return True
+        _year_re = re.compile(r"\b(\d{4})\b")
+        recent_count = 0
+        for cell in first_tr.find_all(["th", "td"]):
+            m = _year_re.search(cell.get_text())
+            if m and int(m.group(1)) > cutoff:
+                recent_count += 1
+        return recent_count >= min_recent
+
     def _fetch_page(self, symbol: str) -> Optional[BeautifulSoup]:
         """Fetch screener.in page — tries consolidated first, falls back to standalone.
 
@@ -101,7 +127,7 @@ class ScreenerInFetcher:
                 resp = self._session.get(url, timeout=20)
                 if resp.status_code == 200:
                     candidate = BeautifulSoup(resp.text, "lxml")
-                    if self._page_has_data(candidate):
+                    if self._page_has_data(candidate) and self._page_has_recent_annual_data(candidate):
                         soup = candidate
                         break
             except Exception:
@@ -201,7 +227,8 @@ class ScreenerInFetcher:
         return df
 
     def get_annual_results(self, symbol: str) -> Optional[pd.DataFrame]:
-        """Annual P&L from <section id='profit-loss'>: Sales, Net Profit, EPS per fiscal year."""
+        """Annual P&L from <section id='profit-loss'>, enriched with Other Income sub-rows
+        (including Exceptional Items) fetched via the schedules AJAX API."""
         cached = self.cache.read(symbol, "si_annual")
         if cached is not None:
             return cached
@@ -209,8 +236,18 @@ class ScreenerInFetcher:
         if not soup:
             return None
         df = self._parse_section_table(soup, "profit-loss")
-        if df is not None and not df.empty:
-            self.cache.write(symbol, "si_annual", df)
+        if df is None or df.empty:
+            return None
+
+        # Enrich with Other Income sub-rows (Exceptional Items, Dividend Income, etc.)
+        company_id = self._get_company_id(soup)
+        if company_id:
+            consolidated = self._is_consolidated(soup)
+            schedule = self._fetch_schedule(company_id, "Other Income", "profit-loss", consolidated)
+            if schedule:
+                df = self._merge_schedule_rows(df, schedule)
+
+        self.cache.write(symbol, "si_annual", df)
         return df
 
     def _get_company_id(self, soup: BeautifulSoup) -> Optional[str]:
@@ -275,11 +312,11 @@ class ScreenerInFetcher:
         if df is None or df.empty:
             return None
 
-        # Enrich with sub-rows (Cash Equivalents, LT/ST Borrowings) via schedules API
+        # Enrich with sub-rows via schedules API
         company_id = self._get_company_id(soup)
         if company_id:
             consolidated = self._is_consolidated(soup)
-            for parent in ["Other Assets", "Borrowings"]:
+            for parent in ["Other Assets", "Borrowings", "Other Liabilities"]:
                 schedule = self._fetch_schedule(company_id, parent, "balance-sheet", consolidated)
                 if schedule:
                     df = self._merge_schedule_rows(df, schedule)

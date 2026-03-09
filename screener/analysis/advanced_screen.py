@@ -12,6 +12,14 @@ import yaml
 
 from screener.analysis.basic_screen import FlagLevel, ScreenFlag, _is_financial
 
+_REAL_ESTATE_KEYWORDS = ("real estate", "realty", "construction", "developer", "housing", "property", "properties")
+
+def _is_real_estate(sector: Optional[str]) -> bool:
+    if not sector:
+        return False
+    s = sector.lower()
+    return any(kw in s for kw in _REAL_ESTATE_KEYWORDS)
+
 
 def _load_cfg() -> dict:
     return yaml.safe_load(
@@ -89,6 +97,14 @@ class AdvancedScreenResult:
     pe_min_10y: Optional[float] = None
     pe_max_10y: Optional[float] = None
     pe_periods_10y: Optional[int] = None
+    # Real Estate specific (₹ Cr) — only populated for RE/construction companies
+    is_real_estate: bool = False
+    re_inventory_cr: Optional[float] = None
+    re_customer_advances_cr: Optional[float] = None
+    re_trade_receivables_cr: Optional[float] = None
+    re_presales_coverage: Optional[float] = None      # Customer Advances / Borrowings
+    re_net_debt_post_advances: Optional[float] = None  # (Borrowings - Cash - Advances) / Equity
+    re_inventory_years: Optional[float] = None        # Inventory / Annual Revenue
     # Flags
     flags: list[ScreenFlag] = field(default_factory=list)
     red_flag_count: int = 0
@@ -150,6 +166,9 @@ class AdvancedScreener:
         sector: Optional[str] = None,
         eps_yoy_pct: Optional[float] = None,
         pat_yoy_pct: Optional[float] = None,
+        eps_yoy_3y_pct: Optional[float] = None,
+        pat_yoy_3y_pct: Optional[float] = None,
+        pat_cagr_3y: Optional[float] = None,
     ) -> AdvancedScreenResult:
         result = AdvancedScreenResult(symbol=symbol)
         financial = _is_financial(sector)
@@ -158,13 +177,30 @@ class AdvancedScreener:
         cfg_v = self.cfg["valuation"]
         cfg_s = self.cfg["shareholding"]
 
+        result.is_real_estate = _is_real_estate(sector)
         self._fill_ratios(result, price_info, si_ratios)
-        # PEG = P/E / growth rate — use max(EPS, PAT) to avoid dilution distortion
-        growth_for_peg = max(v for v in [eps_yoy_pct, pat_yoy_pct] if v is not None and v > 0) if any(v is not None and v > 0 for v in [eps_yoy_pct, pat_yoy_pct]) else None
-        if result.pe_ratio and result.pe_ratio > 0 and growth_for_peg:
+        # PEG = P/E / 3Y PAT CAGR — matches screener.in's "Profit Var 3Yrs" methodology.
+        # Primary: pat_cagr_3y (endpoint-to-endpoint CAGR from annual data, most stable).
+        # Fallback chain: eps_yoy_3y → pat_yoy_3y → positive 1Y eps/pat.
+        # Negative CAGR = earnings shrinking over 3Y while trading at positive P/E (bad signal).
+        if pat_cagr_3y is not None and pat_cagr_3y != 0:
+            growth_for_peg = pat_cagr_3y
+        elif eps_yoy_3y_pct is not None:
+            growth_for_peg = eps_yoy_3y_pct
+        elif pat_yoy_3y_pct is not None:
+            growth_for_peg = pat_yoy_3y_pct
+        elif eps_yoy_pct is not None and eps_yoy_pct > 0:
+            growth_for_peg = eps_yoy_pct
+        elif pat_yoy_pct is not None and pat_yoy_pct > 0:
+            growth_for_peg = pat_yoy_pct
+        else:
+            growth_for_peg = None
+        if result.pe_ratio and result.pe_ratio > 0 and growth_for_peg is not None and growth_for_peg != 0:
             result.peg_ratio = round(result.pe_ratio / growth_for_peg, 2)
         self._fill_debt_from_si(result, si_ratios, si_balance_df, si_annual_df, financial)
         self._fill_balance_sheet_si(result, si_balance_df)
+        if result.is_real_estate:
+            self._fill_real_estate_si(result, si_balance_df, si_annual_df)
         self._fill_shareholding(result, shareholding)
         self._fill_working_capital_from_si(result, si_wc_ratios)
         self._fill_fcf_from_si(result, si_balance_df)
@@ -336,6 +372,82 @@ class AdvancedScreener:
             if equity > 0:
                 result.de_ratio = round(result.si_total_borrowings / equity, 2)
 
+    def _fill_real_estate_si(
+        self,
+        result: AdvancedScreenResult,
+        si_balance_df: Optional[pd.DataFrame],
+        si_annual_df: Optional[pd.DataFrame],
+    ) -> None:
+        """Extract and compute real estate specific balance sheet metrics."""
+        if si_balance_df is None or si_balance_df.empty:
+            return
+
+        from screener.analysis.basic_screen import _si_clean, _si_row_series
+
+        cols = list(si_balance_df.columns)
+        end = len(cols) - 1 if str(cols[-1]).strip().upper() == "TTM" else len(cols)
+
+        def _latest_bs(keywords: list[str]) -> Optional[float]:
+            for _, row in si_balance_df.iterrows():
+                label = str(row.iloc[0]).lower().strip()
+                if any(kw.lower() in label for kw in keywords):
+                    vals = [_si_clean(row.iloc[i]) for i in range(1, end)]
+                    s = pd.Series(vals, dtype=float).dropna()
+                    return float(s.iloc[-1]) if not s.empty else None
+            return None
+
+        # Inventory (land bank + WIP)
+        result.re_inventory_cr = _latest_bs(["Inventories", "Inventory"])
+
+        # Customer Advances (advance received from buyers — under Other Liabilities)
+        result.re_customer_advances_cr = _latest_bs([
+            "Advance from Customers", "Advances from Customers",
+            "Customer Advances", "Advance from customers",
+            "Advances received from customers",
+        ])
+
+        # Trade Receivables
+        result.re_trade_receivables_cr = _latest_bs([
+            "Trade Receivables", "Debtors", "Trade receivables",
+        ])
+
+        # Annual revenue for inventory years (from P&L)
+        annual_revenue = None
+        if si_annual_df is not None and not si_annual_df.empty:
+            rev_s = _si_row_series(si_annual_df, [
+                "Revenue from operations", "Sales", "Revenue", "Total Revenue",
+                "Net Revenue", "Turnover",
+            ])
+            if rev_s is not None and not rev_s.dropna().empty:
+                annual_revenue = float(rev_s.dropna().iloc[-1])
+
+        # Pre-sales coverage = Customer Advances / Total Borrowings
+        if result.re_customer_advances_cr is not None and result.si_total_borrowings and result.si_total_borrowings > 0:
+            result.re_presales_coverage = round(result.re_customer_advances_cr / result.si_total_borrowings, 3)
+
+        # Net Debt post-advances = (Borrowings - Cash - Customer Advances) / Equity
+        borrowings = result.si_total_borrowings or 0
+        cash = result.si_cash_equivalents or 0
+        advances = result.re_customer_advances_cr or 0
+        # Equity = equity capital + reserves (fallback: compute from balance sheet)
+        equity = 0.0
+        for _, row in si_balance_df.iterrows():
+            label = str(row.iloc[0]).lower().strip()
+            if "equity capital" in label or "share capital" in label:
+                vals = [_si_clean(row.iloc[i]) for i in range(1, end)]
+                s = pd.Series(vals, dtype=float).dropna()
+                equity += float(s.iloc[-1]) if not s.empty else 0
+            elif "reserves" in label and "revaluation" not in label:
+                vals = [_si_clean(row.iloc[i]) for i in range(1, end)]
+                s = pd.Series(vals, dtype=float).dropna()
+                equity += float(s.iloc[-1]) if not s.empty else 0
+        if equity > 0 and borrowings > 0:
+            result.re_net_debt_post_advances = round((borrowings - cash - advances) / equity, 3)
+
+        # Inventory years = Inventory / Annual Revenue
+        if result.re_inventory_cr is not None and annual_revenue and annual_revenue > 0:
+            result.re_inventory_years = round(result.re_inventory_cr / annual_revenue, 2)
+
     def _fill_fcf_from_si(self, result: AdvancedScreenResult, si_balance_df: Optional[pd.DataFrame]) -> None:
         """FCF latest value is passed via BasicScreenResult.si_fcf_annual — set at call site in screen()."""
         # FCF is already available on BasicScreenResult.si_fcf_annual (OCF + ICF from screener.in).
@@ -391,13 +503,17 @@ class AdvancedScreener:
         # --- ROE/ROCE flags ---
         cfg_prof = self.cfg["profitability"]
         if result.roe_pct is not None:
-            if result.roe_pct < cfg_prof["roe_min_pct"]:
+            if result.roe_pct < 0:
+                result.flags.append(ScreenFlag(FlagLevel.RED, "Profitability", f"Negative ROE: {result.roe_pct:.1f}% — equity erosion"))
+            elif result.roe_pct < cfg_prof["roe_min_pct"]:
                 result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Profitability", f"Low ROE: {result.roe_pct:.1f}% (min {cfg_prof['roe_min_pct']}%)"))
             else:
                 result.flags.append(ScreenFlag(FlagLevel.GREEN, "Profitability", f"Strong ROE: {result.roe_pct:.1f}%"))
 
         if result.roce_pct is not None:
-            if result.roce_pct < cfg_prof["roce_min_pct"]:
+            if result.roce_pct < 0:
+                result.flags.append(ScreenFlag(FlagLevel.RED, "Profitability", f"Negative ROCE: {result.roce_pct:.1f}% — destroying capital"))
+            elif result.roce_pct < cfg_prof["roce_min_pct"]:
                 result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Profitability", f"Low ROCE: {result.roce_pct:.1f}% (min {cfg_prof['roce_min_pct']}%)"))
             else:
                 result.flags.append(ScreenFlag(FlagLevel.GREEN, "Profitability", f"Strong ROCE: {result.roce_pct:.1f}%"))
@@ -424,6 +540,19 @@ class AdvancedScreener:
                 result.flags.append(ScreenFlag(FlagLevel.GREEN, "Institutional", f"FII buying: +{result.fii_holding_delta:.1f}% QoQ"))
             elif result.fii_holding_delta <= -cfg_s["fii_increase_min_pct"]:
                 result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Institutional", f"FII selling: {result.fii_holding_delta:.1f}% QoQ"))
+
+        # Combined FII + DII both selling — strong institutional exit signal
+        fii_down = result.fii_holding_delta is not None and result.fii_holding_delta <= -cfg_s["fii_increase_min_pct"]
+        dii_down = result.dii_holding_delta is not None and result.dii_holding_delta <= -cfg_s.get("dii_increase_min_pct", 1.0)
+        if fii_down and dii_down:
+            result.flags.append(ScreenFlag(FlagLevel.RED, "Institutional",
+                f"Both FII ({result.fii_holding_delta:+.1f}%) and DII ({result.dii_holding_delta:+.1f}%) selling QoQ — institutional exit"))
+
+        # High public holding — signals weak institutional / promoter conviction
+        pub_max = cfg_s.get("public_holding_max_pct", 30.0)
+        if result.public_holding_pct is not None and result.public_holding_pct > pub_max:
+            result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Institutional",
+                f"High public holding: {result.public_holding_pct:.1f}% (max {pub_max:.0f}%) — low institutional/promoter conviction"))
 
         # --- Valuation flags ---
         # P/E vs 5Y historical mean — flag matches scoring buckets
@@ -463,7 +592,10 @@ class AdvancedScreener:
 
         if result.peg_ratio is not None:
             peg_max = cfg_v["peg_max"]
-            if result.peg_ratio < 0.75:
+            if result.peg_ratio < 0:
+                result.flags.append(ScreenFlag(FlagLevel.RED, "Valuation",
+                    f"PEG {result.peg_ratio:.2f} — negative: 3Y earnings declining while trading at positive P/E"))
+            elif result.peg_ratio < 0.75:
                 result.flags.append(ScreenFlag(FlagLevel.GREEN, "Valuation", f"PEG {result.peg_ratio:.2f} — growth on sale (< 0.75)"))
             elif result.peg_ratio <= peg_max:
                 result.flags.append(ScreenFlag(FlagLevel.GREEN, "Valuation", f"PEG {result.peg_ratio:.2f} — fair value vs growth"))
@@ -488,6 +620,51 @@ class AdvancedScreener:
         if result.inventory_days is not None and result.inventory_days > cfg_wc["inventory_days_max"]:
             result.flags.append(ScreenFlag(FlagLevel.YELLOW, "WorkingCapital", f"High inventory days: {result.inventory_days:.0f} (max {cfg_wc['inventory_days_max']})"))
 
+        # --- Real estate specific flags ---
+        if result.is_real_estate:
+            cfg_re = self.cfg.get("real_estate", {})
+            if result.re_presales_coverage is not None:
+                green = cfg_re.get("presales_coverage_green", 0.75)
+                red   = cfg_re.get("presales_coverage_red", 0.25)
+                pct   = result.re_presales_coverage
+                if pct >= green:
+                    result.flags.append(ScreenFlag(FlagLevel.GREEN, "RealEstate",
+                        f"Pre-sales coverage {pct:.0%} — customer-funded (≥ {green:.0%})"))
+                elif pct >= red:
+                    result.flags.append(ScreenFlag(FlagLevel.YELLOW, "RealEstate",
+                        f"Pre-sales coverage {pct:.0%} — moderate reliance on debt"))
+                else:
+                    result.flags.append(ScreenFlag(FlagLevel.RED, "RealEstate",
+                        f"Pre-sales coverage {pct:.0%} — debt-heavy (< {red:.0%})"))
+
+            if result.re_net_debt_post_advances is not None:
+                nd = result.re_net_debt_post_advances
+                max_ok  = cfg_re.get("net_debt_post_advances_max", 0.5)
+                max_red = cfg_re.get("net_debt_post_advances_red", 1.5)
+                if nd <= max_ok:
+                    result.flags.append(ScreenFlag(FlagLevel.GREEN, "RealEstate",
+                        f"Net debt post-advances {nd:.2f}x equity — healthy (≤ {max_ok}x)"))
+                elif nd <= max_red:
+                    result.flags.append(ScreenFlag(FlagLevel.YELLOW, "RealEstate",
+                        f"Net debt post-advances {nd:.2f}x equity — elevated"))
+                else:
+                    result.flags.append(ScreenFlag(FlagLevel.RED, "RealEstate",
+                        f"Net debt post-advances {nd:.2f}x equity — over-leveraged (> {max_red}x)"))
+
+            if result.re_inventory_years is not None:
+                iy = result.re_inventory_years
+                green_y = cfg_re.get("inventory_years_green", 3.0)
+                red_y   = cfg_re.get("inventory_years_red", 6.0)
+                if iy <= green_y:
+                    result.flags.append(ScreenFlag(FlagLevel.GREEN, "RealEstate",
+                        f"Inventory {iy:.1f}y revenue — good velocity (≤ {green_y}y)"))
+                elif iy <= red_y:
+                    result.flags.append(ScreenFlag(FlagLevel.YELLOW, "RealEstate",
+                        f"Inventory {iy:.1f}y revenue — moderate land bank"))
+                else:
+                    result.flags.append(ScreenFlag(FlagLevel.RED, "RealEstate",
+                        f"Inventory {iy:.1f}y revenue — slow-moving land bank (> {red_y}y)"))
+
     def _compute_score(
         self,
         result: AdvancedScreenResult,
@@ -499,103 +676,190 @@ class AdvancedScreener:
         score = 50
         bd: dict = {"profitability": 0, "debt": 0, "shareholding": 0, "valuation": 0, "penalties": 0}
 
-        # ROE (max ±10)
+        # Per-factor scale: YAML weight / built-in default. 0.0 when factor is disabled.
+        _DEFAULTS = {
+            "roe": 10, "roce": 8, "de_ratio": 12, "interest_coverage": 6, "fcf": 5,
+            "peg_ratio": 8, "historical_pe": 8,
+            "promoter_pledge": 10, "promoter_holding": 8,
+            "fii_activity": 6, "dii_activity": 3,
+            "working_capital": 5, "red_flag_penalty": 5,
+        }
+        _fcts = self.cfg.get("scoring", {}).get("factors", {})
+
+        def _sf(name: str) -> float:
+            f = _fcts.get(name, {})
+            if not f.get("enabled", True):
+                return 0.0
+            return float(f.get("weight", _DEFAULTS[name])) / _DEFAULTS[name]
+
+        # ROE (default max ±10)
         if result.roe_pct is not None:
-            pts = 10 if result.roe_pct >= cfg_prof["roe_min_pct"] * 2 else \
-                   5 if result.roe_pct >= cfg_prof["roe_min_pct"] else -5
+            raw = (10 if result.roe_pct >= cfg_prof["roe_min_pct"] * 2 else
+                    5 if result.roe_pct >= cfg_prof["roe_min_pct"] else
+                   -5 if result.roe_pct >= 0 else
+                  -10 if result.roe_pct >= -10 else -15)  # negative ROE: deeper loss = heavier penalty
+            pts = round(raw * _sf("roe"))
             score += pts
             bd["profitability"] += pts
 
-        # ROCE (max ±8)
+        # ROCE (default max ±8)
         if result.roce_pct is not None:
-            pts = 8 if result.roce_pct >= cfg_prof["roce_min_pct"] * 2 else \
-                  4 if result.roce_pct >= cfg_prof["roce_min_pct"] else -4
+            raw = (8 if result.roce_pct >= cfg_prof["roce_min_pct"] * 2 else
+                   4 if result.roce_pct >= cfg_prof["roce_min_pct"] else
+                  -4 if result.roce_pct >= 0 else
+                  -8 if result.roce_pct >= -5 else -12)  # negative ROCE: destroying capital
+            pts = round(raw * _sf("roce"))
             score += pts
             bd["profitability"] += pts
 
-        # D/E ratio (max ±12)
+        # D/E ratio (default max ±12)
         if result.de_ratio is not None:
-            pts = 12 if result.de_ratio < 0.5 else \
-                   6 if result.de_ratio < cfg_d["de_ratio_max"] else \
-                  -6 if result.de_ratio < cfg_d["de_ratio_red"] else -12
+            raw = (12 if result.de_ratio < 0.5 else
+                    6 if result.de_ratio < cfg_d["de_ratio_max"] else
+                   -6 if result.de_ratio < cfg_d["de_ratio_red"] else -12)
+            pts = round(raw * _sf("de_ratio"))
             score += pts
             bd["debt"] += pts
 
-        # Interest coverage (max ±6)
+        # Interest coverage (default max ±6)
         if result.interest_coverage is not None:
-            pts = 6 if result.interest_coverage >= cfg_d.get("interest_coverage_min", 3) * 2 else \
-                  3 if result.interest_coverage >= cfg_d.get("interest_coverage_min", 3) else -6
+            raw = (6 if result.interest_coverage >= cfg_d.get("interest_coverage_min", 3) * 2 else
+                   3 if result.interest_coverage >= cfg_d.get("interest_coverage_min", 3) else -6)
+            pts = round(raw * _sf("interest_coverage"))
             score += pts
             bd["debt"] += pts
 
-        # FCF (max ±5)
+        # FCF (default max ±5)
         if result.fcf_latest is not None:
-            pts = 5 if result.fcf_latest > 0 else -5
+            raw = 5 if result.fcf_latest > 0 else -5
+            pts = round(raw * _sf("fcf"))
             score += pts
             bd["debt"] += pts
 
-        # Promoter pledge (max ±10)
-        if result.promoter_pledge_pct is not None:
-            pts = 5 if result.promoter_pledge_pct == 0 else \
-                  2 if result.promoter_pledge_pct <= cfg_s["promoter_pledge_max_pct"] else \
-                 -5 if result.promoter_pledge_pct <= cfg_s["promoter_pledge_red_pct"] else -10
+        # Promoter pledge (default max ±10)
+        pp_sf = _sf("promoter_pledge")
+        if pp_sf and result.promoter_pledge_pct is not None:
+            raw = (5 if result.promoter_pledge_pct == 0 else
+                   2 if result.promoter_pledge_pct <= cfg_s["promoter_pledge_max_pct"] else
+                  -5 if result.promoter_pledge_pct <= cfg_s["promoter_pledge_red_pct"] else -10)
+            pts = round(raw * pp_sf)
             score += pts
             bd["shareholding"] += pts
-        if result.pledge_delta and result.pledge_delta > cfg_s["promoter_pledge_increase_alert"]:
-            score -= 10
-            bd["shareholding"] -= 10
+        if pp_sf and result.pledge_delta and result.pledge_delta > cfg_s["promoter_pledge_increase_alert"]:
+            pts = round(-10 * pp_sf)
+            score += pts
+            bd["shareholding"] += pts
 
-        # Promoter holding QoQ (max ±8)
-        if result.promoter_holding_delta is not None:
-            pts = 6 if result.promoter_holding_delta > 1.0 else \
-                  2 if result.promoter_holding_delta > 0 else \
-                 -8 if result.promoter_holding_delta < -cfg_s["promoter_holding_decrease_alert"] else -3
+        # Promoter holding QoQ (default max ±8, 6Q trend ±2)
+        ph_sf = _sf("promoter_holding")
+        if ph_sf and result.promoter_holding_delta is not None:
+            raw = (6 if result.promoter_holding_delta > 1.0 else
+                   3 if result.promoter_holding_delta >= 0 else
+                  -8 if result.promoter_holding_delta < -cfg_s["promoter_holding_decrease_alert"] else -3)
+            pts = round(raw * ph_sf)
             score += pts
             bd["shareholding"] += pts
         # 6Q trend reinforces signal
-        if result.promoter_holding_6q_delta is not None:
-            pts = 2 if result.promoter_holding_6q_delta > 2.0 else \
-                 -2 if result.promoter_holding_6q_delta < -3.0 else 0
+        if ph_sf and result.promoter_holding_6q_delta is not None:
+            raw = (2 if result.promoter_holding_6q_delta > 2.0 else
+                  -2 if result.promoter_holding_6q_delta < -3.0 else 0)
+            pts = round(raw * ph_sf)
             score += pts
             bd["shareholding"] += pts
 
-        # FII activity (max ±6)
-        if result.fii_holding_delta is not None:
-            pts = 6 if result.fii_holding_delta >= cfg_s["fii_increase_min_pct"] * 2 else \
-                  3 if result.fii_holding_delta >= cfg_s["fii_increase_min_pct"] else \
-                 -6 if result.fii_holding_delta <= -cfg_s["fii_increase_min_pct"] * 2 else \
-                 -3 if result.fii_holding_delta <= -cfg_s["fii_increase_min_pct"] else 0
+        # FII activity (default max ±6)
+        fii_sf = _sf("fii_activity")
+        if fii_sf and result.fii_holding_delta is not None:
+            raw = (6 if result.fii_holding_delta >= cfg_s["fii_increase_min_pct"] * 2 else
+                   3 if result.fii_holding_delta >= cfg_s["fii_increase_min_pct"] else
+                  -6 if result.fii_holding_delta <= -cfg_s["fii_increase_min_pct"] * 2 else
+                  -3 if result.fii_holding_delta <= -cfg_s["fii_increase_min_pct"] else 0)
+            pts = round(raw * fii_sf)
             score += pts
             bd["shareholding"] += pts
-        # DII (max ±3)
-        if result.dii_holding_delta is not None:
-            pts = 3 if result.dii_holding_delta >= cfg_s["fii_increase_min_pct"] else \
-                 -3 if result.dii_holding_delta <= -cfg_s["fii_increase_min_pct"] else 0
+        # DII (default max ±3)
+        dii_sf = _sf("dii_activity")
+        if dii_sf and result.dii_holding_delta is not None:
+            raw = (3 if result.dii_holding_delta >= cfg_s["fii_increase_min_pct"] else
+                  -3 if result.dii_holding_delta <= -cfg_s["fii_increase_min_pct"] else 0)
+            pts = round(raw * dii_sf)
             score += pts
             bd["shareholding"] += pts
 
-        # PEG ratio (max ±6)
-        if result.peg_ratio is not None and result.peg_ratio > 0:
-            pts = 6 if result.peg_ratio < 0.75 else \
-                  3 if result.peg_ratio <= cfg_v["peg_max"] else \
-                 -4 if result.peg_ratio <= 2.5 else -6
+        # Both FII + DII selling simultaneously → -10 (scaled by fii weight)
+        fii_down = result.fii_holding_delta is not None and result.fii_holding_delta <= -cfg_s["fii_increase_min_pct"]
+        dii_down = result.dii_holding_delta is not None and result.dii_holding_delta <= -cfg_s.get("dii_increase_min_pct", 1.0)
+        if fii_down and dii_down:
+            pts = round(-10 * fii_sf)
+            score += pts
+            bd["shareholding"] += pts
+
+        # High public holding (> 30%) → -5
+        pub_max = cfg_s.get("public_holding_max_pct", 30.0)
+        if result.public_holding_pct is not None and result.public_holding_pct > pub_max:
+            pts = round(-5 * fii_sf)
+            score += pts
+            bd["shareholding"] += pts
+
+        # PEG ratio (default max ±8)
+        peg_sf = _sf("peg_ratio")
+        if peg_sf and result.peg_ratio is not None:
+            if result.peg_ratio < 0:
+                # Negative PEG = positive P/E but declining 3Y earnings — premium paid for a shrinking business
+                raw = -8
+            else:
+                raw = (6 if result.peg_ratio < 0.75 else
+                       3 if result.peg_ratio <= cfg_v["peg_max"] else
+                      -4 if result.peg_ratio <= 2.5 else -6)
+            pts = round(raw * peg_sf)
             score += pts
             bd["valuation"] += pts
 
-        # Historical P/E vs mean (max ±8)
+        # Historical P/E vs mean (default max ±8)
+        hpe_sf = _sf("historical_pe")
         pe_mean_ref = result.pe_mean_5y or result.pe_mean_historical
-        if result.pe_ratio and result.pe_ratio > 0 and pe_mean_ref and pe_mean_ref > 0:
+        if hpe_sf and result.pe_ratio and result.pe_ratio > 0 and pe_mean_ref and pe_mean_ref > 0:
             ratio = result.pe_ratio / pe_mean_ref
-            pts = 8 if ratio < 0.70 else \
-                  4 if ratio < 0.90 else \
-                  0 if ratio <= 1.15 else \
-                 -4 if ratio <= 1.40 else -8
+            raw = (8 if ratio < 0.70 else
+                   4 if ratio < 0.90 else
+                   0 if ratio <= 1.15 else
+                  -4 if ratio <= 1.40 else -8)
+            pts = round(raw * hpe_sf)
             score += pts
             bd["valuation"] += pts
+
+        # Real estate specific scoring (replaces working capital for RE companies)
+        if result.is_real_estate:
+            cfg_re = self.cfg.get("real_estate", {})
+            re_pts = 0
+            # Pre-sales coverage (max ±10)
+            if result.re_presales_coverage is not None:
+                pc = result.re_presales_coverage
+                pts = 10 if pc >= cfg_re.get("presales_coverage_green", 0.75) else \
+                       5 if pc >= 0.50 else \
+                       0 if pc >= cfg_re.get("presales_coverage_red", 0.25) else -8
+                re_pts += pts
+            # Net debt post-advances (max ±10)
+            if result.re_net_debt_post_advances is not None:
+                nd = result.re_net_debt_post_advances
+                pts = 10 if nd <= cfg_re.get("net_debt_post_advances_max", 0.5) else \
+                       5 if nd <= 1.0 else \
+                      -5 if nd <= cfg_re.get("net_debt_post_advances_red", 1.5) else -10
+                re_pts += pts
+            # Inventory years (max ±8)
+            if result.re_inventory_years is not None:
+                iy = result.re_inventory_years
+                pts = 8 if iy <= cfg_re.get("inventory_years_green", 3.0) else \
+                      4 if iy <= 4.0 else \
+                     -4 if iy <= cfg_re.get("inventory_years_red", 6.0) else -8
+                re_pts += pts
+            score += re_pts
+            bd["real_estate"] = re_pts
 
         # Red flag penalty
+        rfp_sf = _sf("red_flag_penalty")
         red_flags = [f for f in result.flags if f.level == FlagLevel.RED]
-        penalty = result.red_flag_count * self.cfg["scoring"]["weights"]["red_flag_penalty"] * -1
+        penalty = round(result.red_flag_count * 5 * rfp_sf)
         score -= penalty
         bd["penalties"] = -penalty
         bd["penalty_flags"] = [f.message for f in red_flags]

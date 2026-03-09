@@ -12,8 +12,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from screener.analysis.basic_screen import BasicScreenResult, FlagLevel, ScreenFlag, _is_financial
-from screener.analysis.advanced_screen import AdvancedScreenResult
+from screener.analysis.basic_screen import BasicScreenResult, FlagLevel, ScreenFlag, _is_financial, _is_lease_heavy, _is_lease_heavy_by_data
+from screener.analysis.advanced_screen import AdvancedScreenResult, _is_real_estate
 from screener.data.pdf_scanner import AuditScanResult
 
 console = Console()
@@ -148,6 +148,7 @@ def print_stock_report(
         f"  [dim]Basic Screener  (×{BW})[/dim]",
         _row_str("  Growth", bbd.get("growth", 0), f"×{BW}", _eff(bbd.get("growth", 0), BW)),
         _row_str("  Profitability", bbd.get("profitability", 0), f"×{BW}", _eff(bbd.get("profitability", 0), BW)),
+        *([_row_str("  Asset Quality", bbd.get("asset_quality", 0), f"×{BW}", _eff(bbd.get("asset_quality", 0), BW))] if bbd.get("asset_quality", 0) != 0 else []),
         _row_str("  Cash Quality", bbd.get("cash_quality", 0), f"×{BW}", _eff(bbd.get("cash_quality", 0), BW)),
         _row_str("  Penalties", bbd.get("penalties", 0), f"×{BW}", _eff(bbd.get("penalties", 0), BW)),
         *_penalty_flag_lines(bbd.get("penalty_flags", []), BW),
@@ -157,6 +158,7 @@ def print_stock_report(
         _row_str("  Debt Health", abd.get("debt", 0), f"×{AW}", _eff(abd.get("debt", 0), AW)),
         _row_str("  Shareholding", abd.get("shareholding", 0), f"×{AW}", _eff(abd.get("shareholding", 0), AW)),
         _row_str("  Valuation", abd.get("valuation", 0), f"×{AW}", _eff(abd.get("valuation", 0), AW)),
+        *([_row_str("  Real Estate", abd.get("real_estate", 0), f"×{AW}", _eff(abd.get("real_estate", 0), AW))] if "real_estate" in abd else []),
         _row_str("  Penalties", abd.get("penalties", 0), f"×{AW}", _eff(abd.get("penalties", 0), AW)),
         *_penalty_flag_lines(abd.get("penalty_flags", []), AW),
         "  " + "═" * 58,
@@ -171,7 +173,8 @@ def print_stock_report(
     growth_table.add_column("Avg QoQ % (5Q)", justify="right")
     growth_table.add_column("Avg YoY % (3Y)", justify="right")
     growth_table.add_column("Avg YoY % (5Y)", justify="right")
-    growth_table.add_column("Latest Value", justify="right")
+    _latest_col = f"Latest ({basic.latest_quarter})" if basic.latest_quarter else "Latest Value"
+    growth_table.add_column(_latest_col, justify="right")
 
     def _growth_style(val: Optional[float], threshold: float = 0) -> str:
         if val is None:
@@ -185,18 +188,26 @@ def print_stock_report(
         Text(_fmt(basic.revenue_yoy_pct, "%"), style=_growth_style(basic.revenue_yoy_pct, 10)),
         _fmt_inr(basic.revenue_latest),
     )
+    def _fmt_yoy_fallback(val: Optional[float], periods: int, nominal: int) -> Text:
+        """Format a YoY % value, appending (nY) when a fallback period was used."""
+        style = _growth_style(val, 10)
+        label = _fmt(val, "%")
+        if val is not None and periods != nominal:
+            label = f"{label} ({periods}Y)"
+        return Text(label, style=style)
+
     growth_table.add_row(
         "PAT (Net Income)",
         Text(_fmt(basic.pat_qoq_pct, "%"), style=_growth_style(basic.pat_qoq_pct)),
-        Text(_fmt(basic.pat_yoy_3y_pct, "%"), style=_growth_style(basic.pat_yoy_3y_pct, 10)),
-        Text(_fmt(basic.pat_yoy_pct, "%"), style=_growth_style(basic.pat_yoy_pct, 10)),
+        _fmt_yoy_fallback(basic.pat_yoy_3y_pct, basic.pat_yoy_3y_periods, 3),
+        _fmt_yoy_fallback(basic.pat_yoy_pct, basic.pat_yoy_periods, 5),
         _fmt_inr(basic.pat_latest),
     )
     growth_table.add_row(
         "EPS",
         Text(_fmt(basic.eps_qoq_pct, "%"), style=_growth_style(basic.eps_qoq_pct)),
-        Text(_fmt(basic.eps_yoy_3y_pct, "%"), style=_growth_style(basic.eps_yoy_3y_pct, 10)),
-        Text(_fmt(basic.eps_yoy_pct, "%"), style=_growth_style(basic.eps_yoy_pct, 10)),
+        _fmt_yoy_fallback(basic.eps_yoy_3y_pct, basic.eps_yoy_3y_periods, 3),
+        _fmt_yoy_fallback(basic.eps_yoy_pct, basic.eps_yoy_periods, 5),
         _fmt(basic.eps_latest, " ₹"),
     )
     console.print(growth_table)
@@ -213,10 +224,37 @@ def print_stock_report(
 
     sector = price_info.get("sector") if price_info else None
     is_fin = _is_financial(sector)
+    industry = price_info.get("industry") if price_info else None
+    is_lease = _is_lease_heavy(sector, industry) or _is_lease_heavy_by_data(
+        basic.si_ocf_ebitda_ratio, basic.si_ocf_pat_ratio
+    )
 
-    prof_table.add_row("EBITDA Margin", _fmt(basic.ebitda_margin_latest_pct, "%"), basic.ebitda_margin_trend or "-")
+    _lumpy = sector and any(k in sector.lower() for k in ("real estate", "construction", "infrastructure", "capital goods", "engineering"))
+    _opm_label = "EBITDA Margin  [dim](annual)[/dim]" if _lumpy else "EBITDA Margin"
+    prof_table.add_row(_opm_label, _fmt(basic.ebitda_margin_latest_pct, "%"), basic.ebitda_margin_trend or "-")
+
+    # OCF/EBITDA — shown for all non-financial companies (extra row for lease-heavy, primary for others)
+    if basic.si_ocf_ebitda_ratio is not None and not is_fin:
+        r = basic.si_ocf_ebitda_ratio
+        ebitda_val = f"  [dim](OCF {basic.si_ocf_annual:+.0f} / EBITDA {basic.si_ebitda_annual:.0f} Cr)[/dim]" \
+            if basic.si_ocf_annual is not None and basic.si_ebitda_annual is not None else ""
+        if r >= 1.0:
+            sig = Text("✓ excellent  (> 1.0x)", style="green")
+        elif r >= 0.7:
+            sig = Text("✓ good  (> 0.7x)", style="green")
+        elif r >= 0:
+            sig = Text("⚠ weak  (< 0.7x)", style="yellow")
+        else:
+            sig = Text("✗ negative", style="red")
+        if is_lease:
+            ocf_row_label = f"OCF/EBITDA  [dim](primary — Ind AS 116)[/dim]{ebitda_val}"
+        else:
+            ocf_row_label = f"OCF/EBITDA{ebitda_val}"
+        prof_table.add_row(ocf_row_label, _fmt(r, "x"), sig)
+
     ocf_ratio = basic.si_ocf_pat_ratio or basic.ocf_pat_ratio
-    if ocf_ratio is not None and not is_fin:
+    # For lease-heavy sectors OCF/PAT is meaningless — hide it to avoid confusion
+    if ocf_ratio is not None and not is_fin and not is_lease:
         src = "[dim](annual)[/dim]" if basic.si_ocf_pat_ratio is not None else "[dim](qtrly)[/dim]"
         ocf_trend = basic.si_ocf_trend or basic.ocf_trend
         _trend_arrow = {"improving": "↑", "deteriorating": "↓", "stable": "→"}.get(ocf_trend or "", "")
@@ -262,7 +300,7 @@ def print_stock_report(
 
     # ---- Section 2a: Asset Quality (financial sector only) ----
     if is_fin and (basic.gross_npa_pct is not None or basic.net_npa_pct is not None):
-        npa_pts = basic.score_breakdown.get("profitability", 0)
+        npa_pts = basic.score_breakdown.get("asset_quality", 0)
         npa_table = Table(title=f"Asset Quality{_pts(npa_pts)}", box=box.SIMPLE_HEAVY)
         npa_table.add_column("Metric", style="dim", min_width=14)
         npa_table.add_column("Latest", justify="right")
@@ -369,7 +407,9 @@ def print_stock_report(
 
     debt_table.add_row("D/E Ratio", _fmt(advanced.de_ratio, "x"), "≤ 1.0")
     debt_table.add_row("Interest Coverage", _fmt(advanced.interest_coverage, "x"), "≥ 3.0")
-    debt_table.add_row("Net Debt/EBITDA", _fmt(advanced.net_debt_to_ebitda, "x"), "≤ 3.0")
+    # Net Debt/EBITDA is not meaningful for RE (revenue recognition lumpy → EBITDA misleading)
+    if not advanced.is_real_estate:
+        debt_table.add_row("Net Debt/EBITDA", _fmt(advanced.net_debt_to_ebitda, "x"), "≤ 3.0")
     debt_table.add_row("FCF (Latest Qtr)", _fmt_inr(advanced.fcf_latest), "Positive")
     console.print(debt_table)
 
@@ -511,6 +551,89 @@ def print_stock_report(
                 )
 
         console.print(dq_table)
+
+    # ---- Section 3d: Real Estate Metrics ----
+    if advanced.is_real_estate and any(v is not None for v in [
+        advanced.re_presales_coverage, advanced.re_net_debt_post_advances,
+        advanced.re_inventory_cr, advanced.re_customer_advances_cr,
+    ]):
+        re_pts = abd.get("real_estate", 0)
+        re_table = Table(
+            title=f"Real Estate Metrics  [dim](₹ Cr)[/dim]{_pts(re_pts)}",
+            box=box.SIMPLE_HEAVY,
+        )
+        re_table.add_column("Metric", style="dim", min_width=28)
+        re_table.add_column("Value", justify="right")
+        re_table.add_column("Threshold", justify="right", style="dim")
+        re_table.add_column("Signal", justify="left")
+
+        def _re_signal(val, green, red, lower_better: bool = False) -> Text:
+            if val is None:
+                return Text("-", style="dim")
+            if lower_better:
+                if val <= green:
+                    return Text("✓ healthy", style="green")
+                elif val <= red:
+                    return Text("⚠ elevated", style="yellow")
+                return Text("✗ high", style="red")
+            else:
+                if val >= green:
+                    return Text("✓ healthy", style="green")
+                elif val >= red:
+                    return Text("⚠ moderate", style="yellow")
+                return Text("✗ weak", style="red")
+
+        # Raw balance sheet amounts
+        if advanced.re_inventory_cr is not None:
+            re_table.add_row(
+                "Inventory  [dim](land bank + WIP)[/dim]",
+                _cr(advanced.re_inventory_cr),
+                "-",
+                Text("", style="dim"),
+            )
+        if advanced.re_customer_advances_cr is not None:
+            re_table.add_row(
+                "Customer Advances  [dim](pre-sales collected)[/dim]",
+                _cr(advanced.re_customer_advances_cr),
+                "-",
+                Text("", style="dim"),
+            )
+        if advanced.re_trade_receivables_cr is not None:
+            re_table.add_row(
+                "Trade Receivables",
+                _cr(advanced.re_trade_receivables_cr),
+                "-",
+                Text("", style="dim"),
+            )
+
+        # Computed ratios
+        if advanced.re_presales_coverage is not None:
+            pc = advanced.re_presales_coverage
+            re_table.add_row(
+                "Pre-sales Coverage  [dim](Advances / Borrowings)[/dim]",
+                f"{pc:.0%}",
+                "≥ 75%",
+                _re_signal(pc, 0.75, 0.25, lower_better=False),
+            )
+        if advanced.re_net_debt_post_advances is not None:
+            nd = advanced.re_net_debt_post_advances
+            nd_style = "green" if nd <= 0.5 else "yellow" if nd <= 1.5 else "red"
+            re_table.add_row(
+                "Net Debt post-Advances  [dim](÷ Equity)[/dim]",
+                Text(f"{nd:.2f}x", style=nd_style),
+                "≤ 0.5x",
+                _re_signal(nd, 0.5, 1.5, lower_better=True),
+            )
+        if advanced.re_inventory_years is not None:
+            iy = advanced.re_inventory_years
+            re_table.add_row(
+                "Inventory Velocity  [dim](years of revenue)[/dim]",
+                f"{iy:.1f}y",
+                "≤ 3y",
+                _re_signal(iy, 3.0, 6.0, lower_better=True),
+            )
+
+        console.print(re_table)
 
     # ---- Section 4: Shareholding ----
     hold_table = Table(title=f"Shareholding Pattern{_pts(abd.get('shareholding', 0))}", box=box.SIMPLE_HEAVY)

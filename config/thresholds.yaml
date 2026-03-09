@@ -35,6 +35,8 @@ shareholding:
   promoter_pledge_increase_alert: 5.0  # Alert if pledge increases by this % QoQ
   promoter_holding_decrease_alert: 2.0 # Alert if promoter selling by this % QoQ
   fii_increase_min_pct: 1.0       # Bullish signal: FII bought this much QoQ
+  public_holding_max_pct: 30.0    # Public holding above this = weak institutional conviction (-5 pts)
+  dii_increase_min_pct: 1.0       # Signal threshold for DII buying QoQ
 
 working_capital:
   debtor_days_max: 90             # Maximum debtor days
@@ -51,6 +53,20 @@ financial_sector:
   net_npa_green_pct: 1.0          # Net NPA below this = well provisioned
   net_npa_red_pct: 3.0            # Net NPA above this = red flag
 
+real_estate:
+  # Pre-sales coverage = Customer Advances / Borrowings
+  presales_coverage_green: 0.75    # Advances > 75% of borrowings = mostly customer funded
+  presales_coverage_red: 0.25      # Advances < 25% of borrowings = debt-heavy
+  # Net debt after advances = (Borrowings - Cash - Advances) / Equity
+  net_debt_post_advances_max: 0.5  # < 0.5x = healthy after netting customer money
+  net_debt_post_advances_red: 1.5  # > 1.5x = over-leveraged even after netting
+  # Receivables aging = Over-6m receivables / Total receivables
+  receivables_aging_green: 0.30    # < 30% overdue = healthy collection
+  receivables_aging_red: 0.65      # > 65% overdue = poor collection
+  # Inventory / Annual Revenue (years of inventory on hand)
+  inventory_years_green: 3.0       # < 3 years = good velocity
+  inventory_years_red: 6.0         # > 6 years = slow-moving land bank
+
 contingent_liabilities:
   net_worth_ratio_max: 0.5        # Contingent liabilities > 50% net worth = RED
 
@@ -59,15 +75,63 @@ cache:
   dir: data/cache                 # Cache directory (relative to project root)
 
 scoring:
-  weights:
-    revenue_growth: 10
-    pat_growth: 10
-    ebitda_margin: 8
-    ocf_quality: 12
-    roe: 10
-    roce: 8
-    debt_health: 12
-    promoter_activity: 10
-    valuation: 10
-    working_capital: 5
-    red_flag_penalty: -5          # Per red flag
+  # Per-factor weights — each entry has `weight` (max pts at default) and `enabled` (bool).
+  # Increase a weight to make a factor matter more; set enabled: false to skip it entirely.
+  # Defaults reflect the original scoring design; the web UI lets users customise per profile.
+  factors:
+    # ─── BasicScreener ────────────────────────────────────────────────────────
+    revenue_growth:
+      weight: 15      # max +pts; -1.0×weight for chronic decline
+      enabled: true
+    pat_growth:
+      weight: 15
+      enabled: true
+    ebitda_margin:
+      weight: 10      # margin level; trend adds ±50 % of weight
+      enabled: true
+    ocf_quality:
+      weight: 15      # OCF/PAT (or OCF/EBITDA for lease-heavy)
+      enabled: true
+    npa_quality:
+      weight: 15      # financial sector only — replaces ebitda_margin + ocf_quality
+      enabled: true
+    # ─── AdvancedScreener ─────────────────────────────────────────────────────
+    roe:
+      weight: 10
+      enabled: true
+    roce:
+      weight: 8
+      enabled: true
+    de_ratio:
+      weight: 12
+      enabled: true
+    interest_coverage:
+      weight: 6
+      enabled: true
+    fcf:
+      weight: 5
+      enabled: true
+    peg_ratio:
+      weight: 8
+      enabled: true
+    historical_pe:
+      weight: 8
+      enabled: true
+    promoter_pledge:
+      weight: 10
+      enabled: true
+    promoter_holding:
+      weight: 8       # QoQ + 6Q trend combined
+      enabled: true
+    fii_activity:
+      weight: 6       # FII QoQ; combined FII+DII selling adds extra -10
+      enabled: true
+    dii_activity:
+      weight: 3
+      enabled: true
+    working_capital:
+      weight: 5       # debtor-days and CCC trend
+      enabled: true
+    red_flag_penalty:
+      weight: 5       # points subtracted per RED flag (for flags not already numerically scored)
+      enabled: true

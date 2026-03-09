@@ -310,3 +310,63 @@ The app is designed to never crash on missing data:
 - **Historical P/E accuracy** — calculated from TTM EPS constructed from quarterly + annual data; approximate for stocks with irregular reporting
 - **PDF audit scan** — keyword-based and semantic only; does not parse financial tables from PDFs
 - **yfinance data gaps** — some smaller/mid-cap Indian stocks have incomplete quarterly data on Yahoo Finance; screener.in data fills many gaps
+
+---
+
+## ExcelScreener Web Product (excelscreener.in)
+
+Marketing + app site that wraps this CLI into a Google Sheets product.
+
+### Repo & Deploy
+- Repo: `git@github.com:ankitjgd/excelscreener.git`
+- Local: `/Users/ankitbhardwaj/Documents/GitHub/excelscreener-marketing/`
+- Stack: Next.js 16 App Router, `output: 'export'` (static HTML), Tailwind CSS + inline styles, react-icons
+- Deploy via rsync to Hostinger (no git on server):
+
+```bash
+cd /Users/ankitbhardwaj/Documents/GitHub/excelscreener-marketing
+rm -rf out/ && npm run build
+rsync -av --delete --exclude='*.txt' out/ \
+  -e "ssh -p 65002" \
+  u889244618@46.28.45.163:/home/u889244618/domains/excelscreener.in/public_html/
+```
+
+### Product Value Prop
+- User has their portfolio in Google Sheets (own formulas, buy price, P&L etc.)
+- ExcelScreener adds **only two columns**: `Score` (0–100) and `Comments` (STRONG BUY / BUY / WATCH / AVOID)
+- User's existing data, formulas and layout are completely untouched
+- Score is computed from 40+ fundamental checks (this CLI's logic)
+
+### Pricing
+- **Free**: up to 10 stocks per run, no login required
+- **Pro (₹499/mo)**: unlimited stocks, custom scoring weights, weekly/monthly auto-refresh, score change email alerts, 90-day history
+
+### Completed (as of Mar 2026)
+- Full marketing site: Home, How It Works, Features, Pricing, Blog (3 posts), FAQ, Screener page
+- Hero: animated spreadsheet mockup with scan animation + magnifying glass lens
+- Auto-refresh section on home + highlighted in pricing page
+- Favicon (`app/icon.svg`) and OG image (`app/opengraph-image.tsx`)
+- Mobile responsive: all sections use `mob-*` utility classes, spreadsheet mocks hidden on mobile
+- Removed all "Indian"/"India" from page titles, metadata, and copy
+- All icons: react-icons only (no emoji/inline SVG)
+
+### Backend (Not Yet Built)
+The `/screener` page at `app/screener/page.tsx` is already wired to poll a backend API:
+
+```
+POST /run        { sheetUrl, email }  →  { jobId }
+GET  /status/{jobId}                  →  { stage, progress, done, resultUrl }
+```
+
+Planned architecture:
+- **Lambda on AWS** (or similar) runs the Python screener CLI
+- **Google Sheets API** via service account: reads column A symbols, writes Score + Comments back
+- **EventBridge / cron Lambda** for weekly/monthly auto-refresh
+- Set `NEXT_PUBLIC_API_URL` in `.env.production` once Lambda URL is known
+- Service account: `screener@excelscreener.iam.gserviceaccount.com`
+
+### Environment Variables (web)
+| Variable | Purpose |
+|----------|---------|
+| `NEXT_PUBLIC_API_URL` | Backend Lambda URL (not set yet) |
+| `NEXT_PUBLIC_GA_ID` | Google Analytics (not set yet) |

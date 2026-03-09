@@ -134,28 +134,41 @@ Growth scoring uses the **worse of 3Y and 5Y averages** — a stock with strong 
 |-------|-----------|
 | Revenue YoY growth | worst of 3Y / 5Y avg ≥ 10% |
 | PAT YoY growth | worst of 3Y / 5Y avg ≥ 10% |
-| EBITDA margin | ≥ 10% (non-financial only) |
-| OCF / PAT ratio | ≥ 0.75 (non-financial only) |
-| Gross NPA % | ≤ 3% green, > 7% red (financial sector only) |
-| Net NPA % | ≤ 1% green, > 3% red (financial sector only) |
+| PAT QoQ (chronic loss) | if QoQ suppressed due to majority-loss quarters → −10 pts + RED flag |
+| EBITDA margin | ≥ 10% (non-financial only; annual for real estate / construction) |
+| OCF / EBITDA ratio | ≥ 1.0 excellent · ≥ 0.85 good · ≥ 0.7 acceptable (Ind AS 116 sectors — primary metric) |
+| OCF / PAT ratio | ≥ 0.75 (standard sectors only — hidden for Ind AS 116 and financial sectors) |
+| Gross NPA % | ≤ 1.5% +15 · ≤ 3% +10 · ≤ 5% −5 · ≤ 7% −10 · > 7% −15 (financial sector only) |
+| Net NPA % | ≤ 0.5% +10 · ≤ 1% +5 · ≤ 2% −5 · ≤ 3% −10 · > 3% −15 (financial sector only) |
+| NPA 1Y trend | Gross NPA improved > 1pp: +5 · worsened > 1pp: −5 (financial sector only) |
 
 ### Advanced (Health & Valuation)
 | Check | Threshold |
 |-------|-----------|
-| ROE | ≥ 15% |
-| ROCE | ≥ 12% |
+| ROE | ≥ 30%: +10 · ≥ 15%: +5 · 0–15%: −5 · −10–0%: −10 · < −10%: −15 (RED flag if negative) |
+| ROCE | ≥ 24%: +8 · ≥ 12%: +4 · 0–12%: −4 · −5–0%: −8 · < −5%: −12 (RED flag if negative) |
 | Debt/Equity | < 1.0 (red > 2.0); financial sector: < 5.0 (red > 8.0) |
 | Interest coverage | > 3x (red < 1.5x) |
-| Net Debt / EBITDA | < 3x |
+| Net Debt / EBITDA | < 3x (hidden for real estate — negative EBITDA makes it misleading) |
 | P/E vs 5Y historical mean | flag + score match: cheap < 0.90x mean, expensive > 1.15x mean |
+| PEG ratio | < 0.75 cheap · < 1.5 fair · > 2.5 expensive (uses 3Y profit CAGR — same as screener.in) |
 | P/B ratio | < 5x |
 | EV/EBITDA | < 20x |
 | Promoter pledge | < 10% (red > 25%) |
 | Promoter holding QoQ | increase = green, decrease = watch |
 | FII holding QoQ | ≥ +1% = bullish signal |
+| FII + DII both selling QoQ | both ≤ −1% simultaneously → −10 pts + RED flag (institutional exit) |
+| Public holding | > 30% → −5 pts (high retail float = weak institutional/promoter conviction) |
 | Debtor days | < 90 days |
 | Inventory days | < 120 days |
 | Net Cash Flow (annual) | YoY trend — 1Y / 3Y / 5Y Δ% |
+
+### Real Estate Metrics (real estate / construction companies only)
+| Check | Threshold |
+|-------|-----------|
+| Pre-sales coverage | Customer Advances / Borrowings ≥ 1.0x excellent · ≥ 0.5x acceptable · < 0.3x red |
+| Net debt post-advances | (Borrowings − Cash − Customer Advances) / Equity < 1.0x good · > 2.0x red |
+| Inventory velocity | Inventory / Annual Revenue < 2 years good · > 4 years red |
 
 All thresholds are configurable in `config/thresholds.yaml`.
 
@@ -168,8 +181,59 @@ Banks, NBFCs, HFCs, and insurance companies are detected automatically by sector
 - **OCF/PAT ratio** — hidden (loan disbursements are operating outflows; negative OCF is normal)
 - **EBITDA margin** — not shown (banks use NIM instead)
 - **D/E thresholds** — relaxed (< 5.0 normal, > 8.0 red)
-- **NPA scoring** — Gross NPA % and Net NPA % replace margin checks, with 1Y/2Y/3Y trend columns
+- **NPA scoring** — Gross NPA % and Net NPA % replace margin checks, with graduated scoring (not binary) and 1Y trend bonus/penalty. Shown in a separate "Asset Quality" section with its own score contribution.
 - **Revenue row** — falls back to "Interest Earned" / "Total Income" label variants used by screener.in for banks
+
+---
+
+## Ind AS 116 / Lease-Heavy Sector Handling
+
+Cinema chains (PVR INOX), airlines, QSR chains, retailers, telecom, and hospitality companies capitalise long-term operating leases under Ind AS 116. This creates:
+
+- **ROU (Right-of-Use) asset** on the balance sheet
+- **Depreciation** on the ROU asset + **interest** on the lease liability flowing through P&L
+- Net result: PAT can be negative even when actual operations are highly cash-generative
+
+**Why OCF/PAT breaks for these companies:** The lease payments flow through the balance sheet (liability repayment), not through OCF. PAT includes the full depreciation + interest charge from leases. A cinema chain like PVR INOX can have 30% EBITDA margin and healthy OCF, yet report negative PAT. The OCF/PAT ratio will be a large negative number — meaningless as a quality signal.
+
+**The CLI automatically handles this:**
+
+| Normal Check | Ind AS 116 Behaviour |
+|---|---|
+| OCF/PAT ratio | **Replaced by OCF/EBITDA** — scored as primary cash quality metric |
+| OCF/PAT flag | **Hidden** — suppressed to avoid false red flags |
+| OCF/EBITDA | Shown for all companies; labelled `(primary — Ind AS 116)` for lease-heavy |
+
+**OCF/EBITDA thresholds:**
+
+| Ratio | Interpretation |
+|-------|----------------|
+| ≥ 1.0 | Excellent — collecting more cash than operating profit |
+| ≥ 0.85 | Good |
+| ≥ 0.70 | Acceptable |
+| < 0.70 | Investigate |
+
+**Detection:** The screener detects lease-heavy companies by sector/industry keywords (cinema, multiplex, aviation, QSR, retail, telecom, etc.) **and** by a mathematical fallback — if OCF/EBITDA > 0.5 AND OCF/PAT < −5, it auto-classifies as lease-heavy regardless of how yfinance labels the sector. This catches companies like Devyani International (sector = "Consumer Cyclical" but is a QSR operator).
+
+---
+
+## Real Estate Sector Handling
+
+Real estate developers (Godrej Properties, DLF, Prestige, etc.) have unique balance sheet dynamics that standard metrics miss:
+
+- **Customer Advances** — homebuyers pay upfront for under-construction flats; this liability offsets the risk of high borrowings
+- **Inventory** — land + under-construction projects that may take 2–5 years to convert to revenue
+- **Negative EBITDA on consolidated P&L** is common — SPV subsidiaries recognise full construction costs before revenue recognition
+
+**The CLI shows a dedicated "Real Estate Metrics" section with three checks:**
+
+| Metric | What It Measures |
+|--------|-----------------|
+| Pre-sales Coverage | Customer Advances ÷ Borrowings — how much of the debt is pre-funded by buyers |
+| Net Debt Post-Advances | (Borrowings − Cash − Customer Advances) ÷ Equity — true leveraged exposure after netting advances |
+| Inventory Velocity | Inventory ÷ Annual Revenue — how many years to sell through the current project pipeline |
+
+**Note on EBITDA:** Screener fetches the consolidated P&L where project construction costs from SPV subsidiaries are included before revenue is recognised (Ind AS 115 completion method). This can make EBITDA appear negative even for profitable developers. Always compare standalone OPM alongside consolidated for real estate companies.
 
 ---
 
@@ -231,10 +295,11 @@ stock-screener/
 `SCREENING_GUIDE.md` is a standalone quarterly audit reference covering:
 
 - P&L quality checks (revenue, EBITDA, PAT)
+- OCF/PAT and OCF/EBITDA quality analysis (incl. Ind AS 116 lease-heavy exception)
 - Auditor opinion red phrases
 - Debt health analysis
 - Promoter & institutional activity
-- Valuation ratio interpretation
+- Valuation ratio interpretation (P/E, PEG with 3Y growth, P/B, EV/EBITDA)
 - Red flag checklist
-- Sector-specific notes (financial sector adjustments)
+- Sector-specific notes (financial sector, Ind AS 116 lease-heavy, real estate)
 - Quantitative scorecard template

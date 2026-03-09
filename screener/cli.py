@@ -44,15 +44,19 @@ def _screen_symbol(
     si_balance = si_data.get("balance_sheet")
 
     sector = price_info.get("sector") if price_info else None
+    industry = price_info.get("industry") if price_info else None
     basic = basic_screener.screen(
         symbol, si_quarterly_df=si_quarterly, si_annual_df=si_annual,
-        si_cashflow_df=si_cashflow, sector=sector,
+        si_cashflow_df=si_cashflow, sector=sector, industry=industry,
     )
     advanced = advanced_screener.screen(
         symbol, price_info, shareholding, si_ratios,
         historical_pe=historical_pe, si_wc_ratios=si_wc_ratios,
         si_balance_df=si_balance, si_annual_df=si_annual,
-        sector=sector, eps_yoy_pct=basic.eps_yoy_pct, pat_yoy_pct=basic.pat_yoy_pct,
+        sector=sector,
+        eps_yoy_pct=basic.eps_yoy_pct, pat_yoy_pct=basic.pat_yoy_pct,
+        eps_yoy_3y_pct=basic.eps_yoy_3y_pct, pat_yoy_3y_pct=basic.pat_yoy_3y_pct,
+        pat_cagr_3y=basic.pat_cagr_3y,
     )
     return basic, advanced, price_info, price_trend
 

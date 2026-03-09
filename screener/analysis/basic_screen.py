@@ -13,12 +13,40 @@ import yaml
 
 _FINANCIAL_KEYWORDS = ("financial", "bank", "nbfc", "insurance", "lending", "housing finance", "asset management")
 
+# Sectors where Ind AS 116 lease accounting dominates — depreciation/interest are lease repayments,
+# not capex. OCF/PAT is meaningless; OCF/EBITDA is the correct cash quality metric.
+_LEASE_HEAVY_KEYWORDS = ("cinema", "multiplex", "film", "aviation", "airline", "hotel", "hospitality",
+                         "retail", "quick service", "restaurant", "telecom", "tower", "media",
+                         "entertainment", "communication")
+
 
 def _is_financial(sector: Optional[str]) -> bool:
     if not sector:
         return False
     s = sector.lower()
     return any(kw in s for kw in _FINANCIAL_KEYWORDS)
+
+
+def _is_lease_heavy(sector: Optional[str], industry: Optional[str] = None) -> bool:
+    """Detect Ind AS 116 lease-heavy companies by sector/industry label."""
+    for text in [sector, industry]:
+        if text and any(kw in text.lower() for kw in _LEASE_HEAVY_KEYWORDS):
+            return True
+    return False
+
+
+def _is_lease_heavy_by_data(
+    si_ocf_ebitda_ratio: Optional[float],
+    si_ocf_pat_ratio: Optional[float],
+) -> bool:
+    """Math-based fallback: detect Ind AS 116 distortion from the numbers themselves.
+
+    If OCF/EBITDA is healthy (> 0.5) but OCF/PAT is wildly negative (< -5),
+    the gap is almost certainly lease depreciation eating into PAT.
+    """
+    if si_ocf_ebitda_ratio is None or si_ocf_pat_ratio is None:
+        return False
+    return si_ocf_ebitda_ratio > 0.5 and si_ocf_pat_ratio < -5
 
 
 def _load_cfg() -> dict:
@@ -53,9 +81,15 @@ class BasicScreenResult:
     pat_qoq_pct: Optional[float] = None
     pat_yoy_pct: Optional[float] = None
     pat_yoy_3y_pct: Optional[float] = None
+    pat_yoy_periods: int = 5           # actual periods used (5 or 4 if fallback)
+    pat_yoy_3y_periods: int = 3        # actual periods used (3 or 2 if fallback)
+    pat_qoq_suppressed: bool = False   # True when QoQ is None due to majority-negative-base quarters
     eps_qoq_pct: Optional[float] = None
     eps_yoy_pct: Optional[float] = None
     eps_yoy_3y_pct: Optional[float] = None
+    eps_yoy_periods: int = 5           # actual periods used (5 or 4 if fallback)
+    eps_yoy_3y_periods: int = 3        # actual periods used (3 or 2 if fallback)
+    pat_cagr_3y: Optional[float] = None        # 3Y PAT CAGR (endpoint-to-endpoint, used for PEG)
     # Margin
     ebitda_margin_latest_pct: Optional[float] = None
     ebitda_margin_trend: Optional[str] = None  # improving | stable | deteriorating
@@ -66,6 +100,7 @@ class BasicScreenResult:
     revenue_latest: Optional[float] = None
     pat_latest: Optional[float] = None
     eps_latest: Optional[float] = None
+    latest_quarter: Optional[str] = None   # label of the most recent quarter, e.g. "Dec 2024"
     ocf_latest: Optional[float] = None
     # Annual cash flows from screener.in (primary, in Crores)
     si_ocf_annual: Optional[float] = None   # Cash from Operating Activity
@@ -79,6 +114,8 @@ class BasicScreenResult:
     si_net_cf_5y_pct: Optional[float] = None  # Net Cash Flow 5Y % change
     si_ocf_trend: Optional[str] = None      # 5yr trend of annual OCF
     si_ocf_pat_ratio: Optional[float] = None  # annual OCF / annual PAT
+    si_ebitda_annual: Optional[float] = None  # annual Operating Profit (Cr) — for OCF/EBITDA
+    si_ocf_ebitda_ratio: Optional[float] = None  # annual OCF / annual EBITDA (Ind AS 116 sectors)
     # Asset quality — financial sector only
     gross_npa_pct: Optional[float] = None
     gross_npa_1y_chg: Optional[float] = None   # pp change vs 1 year ago
@@ -110,18 +147,117 @@ def _safe_pct_change(series: pd.Series, periods: int = 1) -> Optional[float]:
 
 
 def _avg_qoq_pct(series: pd.Series, n: int = 5) -> Optional[float]:
-    """Average QoQ % change over the last n quarters (smoothed momentum)."""
+    """Average period-over-period % change over the last n periods.
+
+    Skips transitions where the base period is negative (e.g. loss year to
+    profit year) — pct_change() gives a meaningless sign-flip in those cases.
+    Returns None if fewer than 2 valid transitions remain after filtering.
+    """
     try:
         s = series.dropna()
         if len(s) < n + 1:
             return None
-        changes = s.pct_change().dropna()
-        if len(changes) < n:
+        # Take the last n+1 values so we have n transitions
+        window = s.iloc[-(n + 1):]
+        changes = []
+        for i in range(len(window) - 1):
+            prev, curr = float(window.iloc[i]), float(window.iloc[i + 1])
+            if prev == 0 or pd.isna(prev) or pd.isna(curr):
+                continue
+            if prev < 0 or curr < 0:
+                # Skip transitions involving a negative value on either side:
+                # negative base → sign-flip % is meaningless; positive→negative → equally distorting
+                continue
+            changes.append(((curr - prev) / abs(prev)) * 100)
+        if not changes:
             return None
-        avg = changes.iloc[-n:].mean() * 100
-        return round(float(avg), 2)
+        # If more than half the transitions were skipped (chronic losses),
+        # the average is based on too few data points to be meaningful.
+        total_transitions = len(window) - 1
+        if len(changes) < total_transitions / 2:
+            return None
+        return round(sum(changes) / len(changes), 2)
     except Exception:
         return None
+
+
+def _is_chronic_loss_suppressed(series: pd.Series, n: int = 5) -> bool:
+    """Returns True if _avg_qoq_pct would return None due to majority-negative-base suppression.
+
+    Distinguishes "no data" (False) from "data exists but mostly loss quarters" (True).
+    """
+    try:
+        s = series.dropna()
+        if len(s) < n + 1:
+            return False  # insufficient data — not a suppression case
+        window = s.iloc[-(n + 1):]
+        total_transitions = len(window) - 1
+        neg_base_count = sum(1 for i in range(total_transitions) if float(window.iloc[i]) < 0)
+        return neg_base_count >= total_transitions / 2
+    except Exception:
+        return False
+
+
+def _adjust_eps_for_exceptional(eps: pd.Series, raw_pat: pd.Series, adj_pat: pd.Series) -> pd.Series:
+    """Scale EPS by the same ratio as the PAT adjustment (exceptional items removed).
+    adjusted_EPS = EPS × (adj_PAT / raw_PAT) — mathematically correct since
+    EPS = PAT / shares and shares are unchanged within a year.
+    """
+    if raw_pat is None or raw_pat.dropna().empty:
+        return eps
+    adjusted = eps.copy().astype(float)
+    for idx in eps.index:
+        raw_p = float(raw_pat.get(idx, float("nan")))
+        adj_p = float(adj_pat.get(idx, float("nan")))
+        if pd.isna(raw_p) or pd.isna(adj_p) or raw_p == 0:
+            continue
+        adjusted[idx] = float(eps.get(idx, float("nan"))) * (adj_p / raw_p)
+    return adjusted
+
+
+def _adjust_pat_for_exceptional(pat: pd.Series, exceptional: pd.Series) -> pd.Series:
+    """Subtract actual exceptional items from PAT for each year they appear.
+    `exceptional` is the 'Exceptional Items' sub-row fetched from screener.in's
+    schedules AJAX API — so values are exact, not estimated.
+    """
+    if exceptional is None or exceptional.dropna().empty:
+        return pat
+    exc = exceptional.reindex(pat.index).fillna(0).astype(float)
+    adjusted = pat.copy().astype(float)
+    for idx in pat.index:
+        exc_val = exc.get(idx, 0.0)
+        if exc_val != 0.0 and not pd.isna(exc_val):
+            adjusted[idx] = float(pat.get(idx, float("nan"))) - exc_val
+    return adjusted
+
+
+def _cagr_pct(series: pd.Series, n: int) -> Optional[float]:
+    """Compound Annual Growth Rate over n periods using start/end annual values.
+    Requires a positive base value. Returns None if insufficient data or base <= 0."""
+    try:
+        s = series.dropna()
+        if len(s) < n + 1:
+            return None
+        prev = float(s.iloc[-(n + 1)])
+        curr = float(s.iloc[-1])
+        if prev <= 0:
+            return None
+        return round(((curr / prev) ** (1.0 / n) - 1) * 100, 2)
+    except Exception:
+        return None
+
+
+def _avg_qoq_pct_with_fallback(series: pd.Series, n: int) -> tuple[Optional[float], int]:
+    """Try _avg_qoq_pct(series, n); if None, fall back to n-1.
+
+    Returns (value, actual_periods_used).
+    Fallback is only attempted once (n → n-1) and only when n >= 2.
+    """
+    val = _avg_qoq_pct(series, n)
+    if val is not None or n < 2:
+        return val, n
+    val = _avg_qoq_pct(series, n - 1)
+    return val, (n - 1 if val is not None else n)
 
 
 def _avg_yoy_pct(series: pd.Series, n: int = 5) -> Optional[float]:
@@ -235,6 +371,7 @@ class BasicScreener:
         si_annual_df: Optional[pd.DataFrame] = None,
         si_cashflow_df: Optional[pd.DataFrame] = None,
         sector: Optional[str] = None,
+        industry: Optional[str] = None,
     ) -> BasicScreenResult:
         """All financial data from screener.in exclusively."""
         result = BasicScreenResult(symbol=symbol)
@@ -244,12 +381,20 @@ class BasicScreener:
         si_ok = si_quarterly_df is not None and not si_quarterly_df.empty
         ann_ok = si_annual_df is not None and not si_annual_df.empty
 
+        # Capture the latest quarter label from column headers (e.g. "Dec 2024")
+        if si_ok:
+            q_cols = [c for c in si_quarterly_df.columns[1:] if str(c).strip()]
+            if q_cols:
+                result.latest_quarter = str(q_cols[-1]).strip()
+
         if not si_ok:
             result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Data", "No screener.in quarterly data available"))
             result.score = 0
             return result
 
         financial = _is_financial(sector)
+        # lease_heavy is initially sector/industry based; updated after OCF/EBITDA is computed
+        lease_heavy = _is_lease_heavy(sector, industry)
 
         # ── Revenue ────────────────────────────────────────────────────────
         # Banks use "Interest Earned" / "Revenue from operations" instead of "Sales"
@@ -260,7 +405,7 @@ class BasicScreener:
         if rev is not None and not rev.dropna().empty:
             result.revenue_latest = float(rev.dropna().iloc[-1]) * 1e7  # Cr → INR
             result.revenue_qoq_pct = _avg_qoq_pct(rev, 5)
-            ann_rev = _si_row_series(si_annual_df, rev_keys) if ann_ok else None
+            ann_rev = _si_row_series(si_annual_df, rev_keys, skip_ttm=True) if ann_ok else None
             result.revenue_yoy_pct = _avg_qoq_pct(ann_rev, 5) if (ann_rev is not None and not ann_rev.dropna().empty) else _avg_yoy_pct(rev, 5)
             result.revenue_yoy_3y_pct = _avg_qoq_pct(ann_rev, 3) if (ann_rev is not None and not ann_rev.dropna().empty) else _avg_yoy_pct(rev, 3)
 
@@ -270,21 +415,45 @@ class BasicScreener:
         if pat is not None and not pat.dropna().empty:
             result.pat_latest = float(pat.dropna().iloc[-1]) * 1e7  # Cr → INR
             result.pat_qoq_pct = _avg_qoq_pct(pat, 5)
-            ann_pat = _si_row_series(si_annual_df, pat_keys) if ann_ok else None
-            result.pat_yoy_pct = _avg_qoq_pct(ann_pat, 5) if (ann_pat is not None and not ann_pat.dropna().empty) else _avg_yoy_pct(pat, 5)
-            result.pat_yoy_3y_pct = _avg_qoq_pct(ann_pat, 3) if (ann_pat is not None and not ann_pat.dropna().empty) else _avg_yoy_pct(pat, 3)
+            if result.pat_qoq_pct is None:
+                result.pat_qoq_suppressed = _is_chronic_loss_suppressed(pat, 5)
+            ann_pat = _si_row_series(si_annual_df, pat_keys, skip_ttm=True) if ann_ok else None
+            ann_pat_norm = None  # normalised PAT (exceptional items removed) — also used for EPS
+            if ann_pat is not None and not ann_pat.dropna().empty:
+                ann_exc = _si_row_series(si_annual_df, ["Exceptional items", "Exceptional Items", "Exceptional item"], skip_ttm=True)
+                ann_pat_norm = _adjust_pat_for_exceptional(ann_pat, ann_exc)
+                result.pat_yoy_pct, result.pat_yoy_periods = _avg_qoq_pct_with_fallback(ann_pat_norm, 5)
+                result.pat_yoy_3y_pct, result.pat_yoy_3y_periods = _avg_qoq_pct_with_fallback(ann_pat_norm, 3)
+                result.pat_cagr_3y = _cagr_pct(ann_pat, 3)  # raw PAT (not exceptional-adjusted) — matches screener.in's "Profit Var 3Yrs"
+            else:
+                result.pat_yoy_pct = _avg_yoy_pct(pat, 5)
+                result.pat_yoy_3y_pct = _avg_yoy_pct(pat, 3)
 
         # ── EPS ────────────────────────────────────────────────────────────
         eps = _si_row_series(si_quarterly_df, ["EPS in Rs", "EPS"])
         if eps is not None and not eps.dropna().empty:
             result.eps_latest = float(eps.dropna().iloc[-1])
             result.eps_qoq_pct = _avg_qoq_pct(eps, 5)
-            ann_eps = _si_row_series(si_annual_df, ["EPS in Rs", "EPS"]) if ann_ok else None
-            result.eps_yoy_pct = _avg_qoq_pct(ann_eps, 5) if (ann_eps is not None and not ann_eps.dropna().empty) else _avg_yoy_pct(eps, 5)
-            result.eps_yoy_3y_pct = _avg_qoq_pct(ann_eps, 3) if (ann_eps is not None and not ann_eps.dropna().empty) else _avg_yoy_pct(eps, 3)
+            ann_eps = _si_row_series(si_annual_df, ["EPS in Rs", "EPS"], skip_ttm=True) if ann_ok else None
+            if ann_eps is not None and not ann_eps.dropna().empty:
+                if ann_pat_norm is not None and ann_pat is not None:
+                    ann_eps_norm = _adjust_eps_for_exceptional(ann_eps, ann_pat, ann_pat_norm)
+                else:
+                    ann_eps_norm = ann_eps
+                result.eps_yoy_pct, result.eps_yoy_periods = _avg_qoq_pct_with_fallback(ann_eps_norm, 5)
+                result.eps_yoy_3y_pct, result.eps_yoy_3y_periods = _avg_qoq_pct_with_fallback(ann_eps_norm, 3)
+            else:
+                result.eps_yoy_pct = _avg_yoy_pct(eps, 5)
+                result.eps_yoy_3y_pct = _avg_yoy_pct(eps, 3)
 
         # ── EBITDA / Operating margin — screener.in OPM% ──────────────────
-        opm_pct = _si_row_series(si_quarterly_df, ["OPM %", "OPM%", "OPM"])
+        # For sectors with lumpy quarterly revenue (real estate, construction,
+        # capital goods) use annual OPM% — a single bad quarter skews the latest value.
+        _LUMPY_SECTORS = ("real estate", "construction", "infrastructure", "capital goods", "engineering")
+        _use_annual_opm = sector and any(kw in sector.lower() for kw in _LUMPY_SECTORS)
+        opm_src = si_annual_df if (_use_annual_opm and ann_ok) else si_quarterly_df
+        opm_skip_ttm = _use_annual_opm
+        opm_pct = _si_row_series(opm_src, ["OPM %", "OPM%", "OPM"], skip_ttm=opm_skip_ttm)
         if opm_pct is not None and not opm_pct.dropna().empty:
             result.ebitda_margin_latest_pct = round(float(opm_pct.dropna().iloc[-1]), 2)
             result.ebitda_margin_trend = _trend(opm_pct, window=8)
@@ -313,7 +482,7 @@ class BasicScreener:
 
             # OCF/PAT ratio using annual data — more reliable than quarterly
             if ann_ok and result.si_ocf_annual is not None:
-                ann_pat = _si_row_series(si_annual_df, ["Net Profit", "PAT", "Profit after tax"])
+                ann_pat = _si_row_series(si_annual_df, ["Net Profit", "PAT", "Profit after tax"], skip_ttm=True)
                 if ann_pat is not None and not ann_pat.dropna().empty:
                     ann_pat_latest = float(ann_pat.dropna().iloc[-1])
                     if ann_pat_latest != 0:
@@ -321,6 +490,19 @@ class BasicScreener:
                         result.si_ocf_pat_ratio = round(result.si_ocf_annual / ann_pat_latest, 2)
                         # Prefer annual OCF/PAT ratio over quarterly
                         result.ocf_pat_ratio = result.si_ocf_pat_ratio
+
+                # OCF/EBITDA — valid for all sectors, essential for Ind AS 116 lease-heavy companies
+                ann_op = _si_row_series(si_annual_df, ["Operating Profit", "EBITDA"], skip_ttm=True)
+                if ann_op is not None and not ann_op.dropna().empty:
+                    ebitda = float(ann_op.dropna().iloc[-1])
+                    result.si_ebitda_annual = ebitda
+                    if ebitda != 0:
+                        result.si_ocf_ebitda_ratio = round(result.si_ocf_annual / ebitda, 2)
+
+        # Math-based Ind AS 116 detection: healthy OCF/EBITDA but wildly negative OCF/PAT
+        # catches companies like Devyani (sector="Consumer Cyclical") missed by keyword matching
+        if not lease_heavy:
+            lease_heavy = _is_lease_heavy_by_data(result.si_ocf_ebitda_ratio, result.si_ocf_pat_ratio)
 
         # ── NPA (financial sector only) ────────────────────────────────────
         if financial:
@@ -347,8 +529,8 @@ class BasicScreener:
                 result.net_npa_3y_chg = _npa_chg(nnpa, 3)
 
         # --- Flags ---
-        self._apply_flags(result, cfg_g, cfg_p, sector=sector)
-        result.score = self._compute_score(result, cfg_g, cfg_p, sector=sector)
+        self._apply_flags(result, cfg_g, cfg_p, sector=sector, lease_heavy=lease_heavy)
+        result.score = self._compute_score(result, cfg_g, cfg_p, sector=sector, lease_heavy=lease_heavy)
         return result
 
     def _apply_flags(
@@ -357,6 +539,7 @@ class BasicScreener:
         cfg_g: dict,
         cfg_p: dict,
         sector: Optional[str] = None,
+        lease_heavy: bool = False,
     ) -> None:
         financial = _is_financial(sector)
         # Revenue growth
@@ -376,6 +559,11 @@ class BasicScreener:
                 result.flags.append(ScreenFlag(FlagLevel.YELLOW, "Growth", f"Weak PAT growth YoY: {result.pat_yoy_pct:.1f}%"))
             else:
                 result.flags.append(ScreenFlag(FlagLevel.GREEN, "Growth", f"PAT growth YoY: {result.pat_yoy_pct:.1f}%"))
+
+        # PAT QoQ suppressed — majority of recent 5 quarters had losses or negative base
+        if result.pat_qoq_suppressed:
+            result.flags.append(ScreenFlag(FlagLevel.RED, "Growth",
+                "PAT QoQ trend unavailable — majority of recent quarters had losses (chronic PAT weakness)"))
 
         # EPS growth
         if result.eps_yoy_pct is not None:
@@ -420,6 +608,17 @@ class BasicScreener:
         # OCF quality — not applicable for financial sector (lending = negative OCF by nature)
         if financial:
             result.flags.append(ScreenFlag(FlagLevel.GREEN, "CashQuality", "Financial sector — OCF/FCF checks not applicable (loan disbursements are operating cash outflows)"))
+        elif lease_heavy and result.si_ocf_ebitda_ratio is not None:
+            # Ind AS 116 sector: OCF/PAT is distorted by lease depreciation — use OCF/EBITDA
+            r = result.si_ocf_ebitda_ratio
+            if r >= 1.0:
+                result.flags.append(ScreenFlag(FlagLevel.GREEN, "CashQuality", f"Strong cash conversion: OCF/EBITDA {r:.2f}x (Ind AS 116 sector — lease depreciation distorts PAT)"))
+            elif r >= 0.7:
+                result.flags.append(ScreenFlag(FlagLevel.GREEN, "CashQuality", f"Good cash conversion: OCF/EBITDA {r:.2f}x"))
+            elif r >= 0:
+                result.flags.append(ScreenFlag(FlagLevel.YELLOW, "CashQuality", f"Weak cash conversion: OCF/EBITDA {r:.2f}x (min 0.7x)"))
+            else:
+                result.flags.append(ScreenFlag(FlagLevel.RED, "CashQuality", f"Negative OCF despite positive EBITDA: OCF/EBITDA {r:.2f}x"))
         else:
             if result.ocf_pat_ratio is not None:
                 ocf_trend_check = result.si_ocf_trend or result.ocf_trend
@@ -442,83 +641,157 @@ class BasicScreener:
             if result.si_fcf_annual is not None and result.si_fcf_annual < 0:
                 result.flags.append(ScreenFlag(FlagLevel.YELLOW, "CashQuality", f"Negative FCF: ₹{result.si_fcf_annual:,.0f} Cr — investing more than operating cash generated"))
 
-    def _compute_score(self, result: BasicScreenResult, cfg_g: dict, cfg_p: dict, sector: Optional[str] = None) -> int:
+    def _compute_score(self, result: BasicScreenResult, cfg_g: dict, cfg_p: dict, sector: Optional[str] = None, lease_heavy: bool = False) -> int:
         financial = _is_financial(sector)
         score = 50
-        bd: dict = {"growth": 0, "profitability": 0, "cash_quality": 0, "penalties": 0}
+        bd: dict = {"growth": 0, "profitability": 0, "cash_quality": 0, "asset_quality": 0, "penalties": 0}
 
-        def _growth_pts(pct5y, pct3y, threshold):
-            """Score growth using the worse of 3Y and 5Y averages to avoid masking recent deterioration."""
+        # Per-factor scale: YAML weight / built-in default. 0.0 when factor is disabled.
+        _DEFAULTS = {
+            "revenue_growth": 15, "pat_growth": 15, "ebitda_margin": 10,
+            "ocf_quality": 15, "npa_quality": 15, "red_flag_penalty": 5,
+        }
+        _fcts = self.cfg.get("scoring", {}).get("factors", {})
+
+        def _sf(name: str) -> float:
+            f = _fcts.get(name, {})
+            if not f.get("enabled", True):
+                return 0.0
+            return float(f.get("weight", _DEFAULTS[name])) / _DEFAULTS[name]
+
+        def _growth_pts(pct5y, pct3y, threshold, factor_name):
+            """Score growth using the worse of 3Y and 5Y averages.
+
+            Exception: if both are available and the gap between them is large
+            (> 40 pp), the two periods are telling very different stories (e.g.
+            one bad loss year distorting the shorter window while the long-term
+            trend is fine). In that case use the average so neither extreme
+            dominates.
+            """
+            sf = _sf(factor_name)
+            if not sf:
+                return None
             candidates = [p for p in (pct5y, pct3y) if p is not None]
             if not candidates:
                 return None
-            pct = min(candidates)  # penalise if either period is bad
-            return (15 if pct >= threshold * 2 else
-                     8 if pct >= threshold else
-                     2 if pct >= 0 else -15)
+            if len(candidates) == 2 and abs(candidates[0] - candidates[1]) > 40:
+                pct = sum(candidates) / 2  # average when gap is too wide
+            else:
+                pct = min(candidates)  # penalise if either period is bad
+            raw = (15 if pct >= threshold * 2 else
+                    8 if pct >= threshold else
+                    2 if pct >= 0 else -15)
+            return round(raw * sf)
 
-        # Revenue growth (max ±15)
-        rev_pts = _growth_pts(result.revenue_yoy_pct, result.revenue_yoy_3y_pct, cfg_g["revenue_yoy_min_pct"])
+        # Revenue growth (default max ±15)
+        rev_pts = _growth_pts(result.revenue_yoy_pct, result.revenue_yoy_3y_pct, cfg_g["revenue_yoy_min_pct"], "revenue_growth")
         if rev_pts is not None:
             score += rev_pts
             bd["growth"] += rev_pts
 
-        # PAT growth (max ±15)
-        pat_pts = _growth_pts(result.pat_yoy_pct, result.pat_yoy_3y_pct, cfg_g["pat_yoy_min_pct"])
+        # PAT growth (default max ±15)
+        pat_pts = _growth_pts(result.pat_yoy_pct, result.pat_yoy_3y_pct, cfg_g["pat_yoy_min_pct"], "pat_growth")
         if pat_pts is not None:
             score += pat_pts
             bd["growth"] += pat_pts
 
-        # EBITDA margin (max ±10) — not applicable for financial sector
-        if not financial and result.ebitda_margin_latest_pct is not None:
-            pts = 10 if result.ebitda_margin_latest_pct >= 20 else \
-                   5 if result.ebitda_margin_latest_pct >= cfg_p["ebitda_margin_min_pct"] else -5
+        # Chronic loss penalty: PAT QoQ suppressed because majority of recent quarters were losses
+        # This fires only when pat_pts is not already penalising — a safety net for companies
+        # that show positive multi-year YoY averages but have been loss-making recently.
+        if result.pat_qoq_suppressed:
+            chronic_pen = round(10 * _sf("pat_growth"))
+            score -= chronic_pen
+            bd["growth"] -= chronic_pen
+
+        # EBITDA margin (default max ±10) — not applicable for financial sector
+        em_sf = _sf("ebitda_margin")
+        if em_sf and not financial and result.ebitda_margin_latest_pct is not None:
+            raw = (10 if result.ebitda_margin_latest_pct >= 20 else
+                    5 if result.ebitda_margin_latest_pct >= cfg_p["ebitda_margin_min_pct"] else -5)
+            pts = round(raw * em_sf)
             score += pts
             bd["profitability"] += pts
-        if not financial and result.ebitda_margin_trend == "improving":
-            score += 5
-            bd["profitability"] += 5
-        elif not financial and result.ebitda_margin_trend == "deteriorating":
-            score -= 10
-            bd["profitability"] -= 10
+        if em_sf and not financial and result.ebitda_margin_trend == "improving":
+            pts = round(5 * em_sf)
+            score += pts
+            bd["profitability"] += pts
+        elif em_sf and not financial and result.ebitda_margin_trend == "deteriorating":
+            pts = round(-10 * em_sf)
+            score += pts
+            bd["profitability"] += pts
 
-        # NPA scoring — financial sector only (replaces EBITDA margin, max ±20)
-        if financial:
+        # NPA scoring — financial sector only (replaces EBITDA margin)
+        # Scored into bd["asset_quality"] to keep it separate from general profitability.
+        npa_sf = _sf("npa_quality")
+        if npa_sf and financial:
             cfg_fin = self.cfg["financial_sector"]
             gnpa_green = cfg_fin.get("gross_npa_green_pct", 3.0)
             gnpa_red   = cfg_fin.get("gross_npa_red_pct", 7.0)
             nnpa_green = cfg_fin.get("net_npa_green_pct", 1.0)
             nnpa_red   = cfg_fin.get("net_npa_red_pct", 3.0)
-            if result.gross_npa_pct is not None:
-                pts = 10 if result.gross_npa_pct <= gnpa_green else \
-                       0 if result.gross_npa_pct <= gnpa_red else -10
-                score += pts
-                bd["profitability"] += pts
-            if result.net_npa_pct is not None:
-                pts = 10 if result.net_npa_pct <= nnpa_green else \
-                       0 if result.net_npa_pct <= nnpa_red else -10
-                score += pts
-                bd["profitability"] += pts
 
-        # OCF quality (max ±15) — skipped for financial sector
-        if not financial and result.ocf_pat_ratio is not None:
-            pts = 10 if result.ocf_pat_ratio >= 1.0 else \
-                   5 if result.ocf_pat_ratio >= cfg_p["ocf_pat_ratio_min"] else \
-                  -5 if result.ocf_pat_ratio >= 0 else -15
-            score += pts
-            bd["cash_quality"] += pts
-            # Extra penalty for chronic negative OCF (not just a one-off dip)
-            ocf_trend_check = result.si_ocf_trend or result.ocf_trend
-            if result.ocf_pat_ratio < 0 and ocf_trend_check == "stable":
-                score -= 5
-                bd["cash_quality"] -= 5
+            if result.gross_npa_pct is not None:
+                g = result.gross_npa_pct
+                # Gradient: very clean → good → caution → elevated → red
+                raw = (15 if g <= gnpa_green / 2 else
+                       10 if g <= gnpa_green else
+                       -5 if g <= (gnpa_green + gnpa_red) / 2 else
+                      -10 if g <= gnpa_red else -15)
+                pts = round(raw * npa_sf)
+                score += pts
+                bd["asset_quality"] += pts
+
+            if result.net_npa_pct is not None:
+                n = result.net_npa_pct
+                raw = (10 if n <= nnpa_green / 2 else
+                        5 if n <= nnpa_green else
+                       -5 if n <= (nnpa_green + nnpa_red) / 2 else
+                      -10 if n <= nnpa_red else -15)
+                pts = round(raw * npa_sf)
+                score += pts
+                bd["asset_quality"] += pts
+
+            # 1Y trend bonus/penalty — improving NPA trend is a strong forward signal
+            if result.gross_npa_1y_chg is not None:
+                raw = (5 if result.gross_npa_1y_chg < -1.0 else
+                       2 if result.gross_npa_1y_chg < 0 else
+                      -5 if result.gross_npa_1y_chg > 1.0 else
+                      -2 if result.gross_npa_1y_chg > 0 else 0)
+                pts = round(raw * npa_sf)
+                score += pts
+                bd["asset_quality"] += pts
+
+        # OCF quality (default max ±15) — skipped for financial sector
+        ocf_sf = _sf("ocf_quality")
+        if ocf_sf and not financial:
+            if lease_heavy and result.si_ocf_ebitda_ratio is not None:
+                # Ind AS 116 sector: score OCF/EBITDA — PAT is distorted by lease depreciation
+                r = result.si_ocf_ebitda_ratio
+                raw = (15 if r >= 1.0 else 10 if r >= 0.85 else 5 if r >= 0.7 else -5 if r >= 0 else -15)
+                pts = round(raw * ocf_sf)
+                score += pts
+                bd["cash_quality"] += pts
+            elif result.ocf_pat_ratio is not None:
+                raw = (10 if result.ocf_pat_ratio >= 1.0 else
+                        5 if result.ocf_pat_ratio >= cfg_p["ocf_pat_ratio_min"] else
+                       -5 if result.ocf_pat_ratio >= 0 else -15)
+                pts = round(raw * ocf_sf)
+                score += pts
+                bd["cash_quality"] += pts
+                # Extra penalty for chronic negative OCF (not just a one-off dip)
+                ocf_trend_check = result.si_ocf_trend or result.ocf_trend
+                if result.ocf_pat_ratio < 0 and ocf_trend_check == "stable":
+                    pen = round(5 * ocf_sf)
+                    score -= pen
+                    bd["cash_quality"] -= pen
 
         # Red flag penalties — only for categories NOT already captured in numeric scoring above.
         # Growth (revenue/PAT) and CashQuality (OCF) and Margin are already scored numerically,
         # so we skip their red flags here to avoid double-counting.
+        rfp_sf = _sf("red_flag_penalty")
         _ALREADY_SCORED = {"Growth", "Margin", "CashQuality", "AssetQuality"}
         red_flags = [f for f in result.flags if f.level == FlagLevel.RED and f.category not in _ALREADY_SCORED]
-        penalty = len(red_flags) * 5
+        penalty = round(len(red_flags) * 5 * rfp_sf)
         score -= penalty
         bd["penalties"] = -penalty
         bd["penalty_flags"] = [f.message for f in red_flags]
