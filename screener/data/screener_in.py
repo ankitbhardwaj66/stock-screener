@@ -273,7 +273,7 @@ class ScreenerInFetcher:
         try:
             import time as _time
             import random as _random
-            _time.sleep(_random.uniform(0.2, 0.4))
+            _time.sleep(_random.uniform(0.5, 1.0))
             resp = self._session.get(
                 url, timeout=15,
                 headers={"X-Requested-With": "XMLHttpRequest"},
