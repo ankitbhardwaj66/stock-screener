@@ -123,7 +123,7 @@ class ScreenerInFetcher:
         for url_tmpl in _BASE_URLS:
             url = url_tmpl.format(symbol=normalized)
             try:
-                time.sleep(random.uniform(0.3, 0.6))
+                time.sleep(random.uniform(1.0, 2.0))
                 resp = self._session.get(url, timeout=20)
                 if resp.status_code == 200:
                     candidate = BeautifulSoup(resp.text, "lxml")
