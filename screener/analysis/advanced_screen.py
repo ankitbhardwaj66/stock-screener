@@ -685,7 +685,7 @@ class AdvancedScreener:
             "roe": 10, "roce": 8, "de_ratio": 12, "interest_coverage": 6, "fcf": 5,
             "peg_ratio": 8, "historical_pe": 8,
             "promoter_pledge": 10, "promoter_holding": 8,
-            "fii_activity": 6, "dii_activity": 3,
+            "fii_activity": 6, "dii_activity": 6,
             "working_capital": 5, "red_flag_penalty": 5,
         }
         _fcts = self.cfg.get("scoring", {}).get("factors", {})
@@ -768,7 +768,7 @@ class AdvancedScreener:
         if ph_sf and _ph_6q is not None:
             raw = (6 if _ph_6q > 1.0 else
                    3 if _ph_6q >= 0 else
-                  -8 if _ph_6q < -cfg_s["promoter_holding_decrease_alert"] else -3)
+                  -8 if _ph_6q < -cfg_s["promoter_holding_decrease_alert"] else -2)
             pts = round(raw * ph_sf)
             score += pts
             bd["shareholding"] += pts
@@ -788,13 +788,13 @@ class AdvancedScreener:
             bd["shareholding"] += pts
             if pts != 0:
                 _sd.append([f"FII 6Q {_fii_6q:+.1f}pp", pts])
-        # DII — use 6Q delta (default max ±3)
+        # DII — use 6Q delta (default max ±6)
         dii_sf = _sf("dii_activity")
         _dii_6q = result.dii_holding_6q_delta
         if dii_sf and _dii_6q is not None:
             _thr = cfg_s["fii_increase_min_pct"]
-            raw = (3 if _dii_6q >= _thr else
-                  -3 if _dii_6q <= -_thr else 0)
+            raw = (6 if _dii_6q >= _thr else
+                  -6 if _dii_6q <= -_thr else 0)
             pts = round(raw * dii_sf)
             score += pts
             bd["shareholding"] += pts

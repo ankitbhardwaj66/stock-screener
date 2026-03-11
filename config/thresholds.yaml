@@ -128,7 +128,7 @@ scoring:
       weight: 6       # FII QoQ; combined FII+DII selling adds extra -10
       enabled: true
     dii_activity:
-      weight: 3
+      weight: 6
       enabled: true
     working_capital:
       weight: 5       # debtor-days and CCC trend
