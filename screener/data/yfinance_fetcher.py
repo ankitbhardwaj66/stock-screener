@@ -23,7 +23,8 @@ class CacheManager:
 
     def __init__(self, cache_dir: Optional[str] = None, ttl_hours: Optional[int] = None):
         cfg = _load_config()
-        self.cache_dir = Path(cache_dir or cfg["cache"]["dir"])
+        _repo_root = Path(__file__).parent.parent.parent
+        self.cache_dir = Path(cache_dir) if cache_dir else _repo_root / cfg["cache"]["dir"]
         self.ttl_hours = ttl_hours or cfg["cache"]["ttl_hours"]
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
