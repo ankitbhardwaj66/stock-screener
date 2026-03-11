@@ -762,25 +762,17 @@ class AdvancedScreener:
             bd["shareholding"] += pts
             _sd.append([f"Pledge spike +{result.pledge_delta:.1f}pp", pts])
 
-        # Promoter holding QoQ (default max ±8, 6Q trend ±2)
+        # Promoter holding — use 6Q delta as primary signal (default max ±8)
         ph_sf = _sf("promoter_holding")
-        if ph_sf and result.promoter_holding_delta is not None:
-            raw = (6 if result.promoter_holding_delta > 1.0 else
-                   3 if result.promoter_holding_delta >= 0 else
-                  -8 if result.promoter_holding_delta < -cfg_s["promoter_holding_decrease_alert"] else -3)
+        _ph_6q = result.promoter_holding_6q_delta
+        if ph_sf and _ph_6q is not None:
+            raw = (6 if _ph_6q > 1.0 else
+                   3 if _ph_6q >= 0 else
+                  -8 if _ph_6q < -cfg_s["promoter_holding_decrease_alert"] else -3)
             pts = round(raw * ph_sf)
             score += pts
             bd["shareholding"] += pts
-            _sd.append([f"Promo QoQ {result.promoter_holding_delta:+.2f}pp", pts])
-        # 6Q trend reinforces signal
-        if ph_sf and result.promoter_holding_6q_delta is not None:
-            raw = (2 if result.promoter_holding_6q_delta > 2.0 else
-                  -2 if result.promoter_holding_6q_delta < -3.0 else 0)
-            pts = round(raw * ph_sf)
-            score += pts
-            bd["shareholding"] += pts
-            if pts != 0:
-                _sd.append([f"Promo 6Q {result.promoter_holding_6q_delta:+.2f}pp", pts])
+            _sd.append([f"Promo 6Q {_ph_6q:+.2f}pp", pts])
 
         # FII activity — use 6Q delta for trend signal (default max ±6)
         fii_sf = _sf("fii_activity")
