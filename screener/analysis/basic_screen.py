@@ -715,13 +715,6 @@ class BasicScreener:
 
         # EBITDA margin (default max ±10) — not applicable for financial sector
         em_sf = _sf("ebitda_margin")
-        if em_sf and not financial and result.ebitda_margin_latest_pct is not None:
-            raw = (10 if result.ebitda_margin_latest_pct >= 20 else
-                    5 if result.ebitda_margin_latest_pct >= cfg_p["ebitda_margin_min_pct"] else -5)
-            pts = round(raw * em_sf)
-            score += pts
-            bd["profitability"] += pts
-            _pd.append([f"EBITDA {result.ebitda_margin_latest_pct:.1f}%", pts])
         if em_sf and not financial and result.ebitda_margin_qoq_pp is not None:
             _qoq_thr = cfg_p.get("ebitda_margin_qoq_expand_pp", 1.0)
             raw = (4 if result.ebitda_margin_qoq_pp >= _qoq_thr else
