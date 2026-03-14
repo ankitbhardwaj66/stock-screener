@@ -715,12 +715,21 @@ class BasicScreener:
                     2 if pct >= 0 else -15)
             return round(raw * sf)
 
+        def _effective_pct(pct5y, pct3y):
+            """Return the value actually used for scoring — mirrors _growth_pts selection logic."""
+            candidates = [p for p in (pct5y, pct3y) if p is not None]
+            if not candidates:
+                return None
+            if len(candidates) == 2 and abs(candidates[0] - candidates[1]) > 40:
+                return sum(candidates) / 2
+            return min(candidates)
+
         # Revenue growth (default max ±15)
         rev_pts = _growth_pts(result.revenue_yoy_pct, result.revenue_yoy_3y_pct, cfg_g["revenue_yoy_min_pct"], "revenue_growth")
         if rev_pts is not None:
             score += rev_pts
             bd["growth"] += rev_pts
-            _rv = result.revenue_yoy_pct or result.revenue_yoy_3y_pct
+            _rv = _effective_pct(result.revenue_yoy_pct, result.revenue_yoy_3y_pct)
             _gd.append([f"Rev {_rv:.1f}%" if _rv is not None else "Rev", rev_pts])
 
         # PAT growth (default max ±15)
@@ -728,7 +737,7 @@ class BasicScreener:
         if pat_pts is not None:
             score += pat_pts
             bd["growth"] += pat_pts
-            _pv = result.pat_yoy_pct or result.pat_yoy_3y_pct
+            _pv = _effective_pct(result.pat_yoy_pct, result.pat_yoy_3y_pct)
             _gd.append([f"PAT {_pv:.1f}%" if _pv is not None else "PAT", pat_pts])
 
         # Chronic loss penalty: PAT QoQ suppressed because majority of recent quarters were losses
